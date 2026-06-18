@@ -1460,8 +1460,18 @@ class DtvPlaygroundApp(QMainWindow):
         rf = QGroupBox("RF Link & Weather"); rfv = QVBoxLayout(); rfv.setSpacing(3)
         rfv.addWidget(QLabel("Frequency Band"))
         self.freq_band_combo = QComboBox()
-        self.freq_band_combo.addItems(["VHF (174 MHz)", "UHF (600 MHz)",
-                                        "L-Band (1.5 GHz)", "Ku-Band (12 GHz)", "Ka-Band (26 GHz)"])
+        self.freq_band_combo.addItems([
+            "VHF (174 MHz)",
+            "B-Band (450 MHz)",
+            "UHF (600 MHz)",
+            "L-Band (1.5 GHz)",
+            "S-Band (2.5 GHz)",
+            "C-Band (4.0 GHz)",
+            "X-Band (10.0 GHz)",
+            "Ku-Band (12.0 GHz)",
+            "K-Band (20.0 GHz)",
+            "Ka-Band (30.0 GHz)"
+        ])
         self.freq_band_combo.currentIndexChanged.connect(self.on_impairment_changed)
         rfv.addWidget(self.freq_band_combo)
 
@@ -2375,7 +2385,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         for w in widgets: w.blockSignals(True)
 
         cfg = {
-            1: dict(std=0, band=1, wx=0, pwr=40, dist=10,  lna=True,  prop=0, theme=0, res=0, il=True,  acodec=1, noise=0, freq=0, time=1000, fade=0),
+            1: dict(std=0, band=2, wx=0, pwr=40, dist=10,  lna=True,  prop=0, theme=0, res=0, il=True,  acodec=1, noise=0, freq=0, time=1000, fade=0),
         }.get(idx, {})
 
         if cfg:
@@ -2546,15 +2556,15 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
     def on_impairment_changed(self):
         dist   = self.range_slider.value()
         fi     = self.freq_band_combo.currentIndex()
-        freq   = [174.0, 600.0, 1500.0, 12000.0, 26500.0][min(fi, 4)]
+        freq   = [174.0, 450.0, 600.0, 1500.0, 2500.0, 4000.0, 10000.0, 12000.0, 20000.0, 30000.0][min(fi, 9)]
         wi     = self.weather_combo.currentIndex()
         atten  = [
-            [0,     0,     0,     0,     0    ],
-            [0.001, 0.005, 0.02,  0.15,  0.3  ],
-            [0.002, 0.01,  0.05,  0.5,   1.2  ],
-            [0.005, 0.03,  0.12,  3.5,   8.0  ],
-            [0.01,  0.10,  0.35,  8.0,   20.0 ],
-        ][wi][min(fi, 4)]
+            [0,     0,     0,     0,     0,     0,     0,     0,     0,     0    ],
+            [0.001, 0.003, 0.005, 0.02,  0.04,  0.08,  0.12,  0.15,  0.22,  0.3  ],
+            [0.002, 0.006, 0.01,  0.05,  0.10,  0.20,  0.35,  0.5,   0.85,  1.2  ],
+            [0.005, 0.015, 0.03,  0.12,  0.25,  0.50,  2.00,  3.5,   5.80,  8.0  ],
+            [0.01,  0.05,  0.10,  0.35,  0.70,  1.50,  5.00,  8.0,   14.00, 20.0 ],
+        ][wi][min(fi, 9)]
 
         std_idx  = self.std_combo.currentIndex()
         medium_loss = 0.0
@@ -2587,9 +2597,9 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         else:
             self.prop_desc_lbl.setText("Line-of-Sight: standard free-space path loss.")
 
-        # Band-dependent antenna gains (VHF: 3 dBi, UHF: 6 dBi, L-Band: 12 dBi, Ku-Band: 36 dBi, Ka-Band: 42 dBi)
+        # Band-dependent antenna gains (VHF: 3, B: 4.5, UHF: 6, L: 12, S: 18, C: 24, X: 30, Ku: 36, K: 39, Ka: 42 dBi)
         # Represents realistic home TV antennas & high-gain satellite dishes
-        ant_gain = [3.0, 6.0, 12.0, 36.0, 42.0][min(fi, 4)]
+        ant_gain = [3.0, 4.5, 6.0, 12.0, 18.0, 24.0, 30.0, 36.0, 39.0, 42.0][min(fi, 9)]
         rx_gain = ant_gain + (12.0 if self.lna_checkbox.isChecked() else 0.0)
         rx_pwr  = tx_dbm - tloss + rx_gain + pgain
 
