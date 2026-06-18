@@ -12,13 +12,14 @@ RX:  corrupted TS datagrams  →  ffmpeg MPEG-2 decoder  →  authentic error co
 Hardware: QSV → VAAPI → software fallback (auto-detected at launch)
 Audio:    MP2 inside MPEG-TS stream, decoded by ffmpeg → aplay 48kHz stereo
 """
-import sys, os, time, socket, threading, subprocess, io, math, random, queue, signal
+import sys, os, time, socket, threading, subprocess, io, math, random, queue, signal, json
 import numpy as np
 from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider,
     QComboBox, QPushButton, QFileDialog, QGroupBox, QCheckBox,
-    QProgressBar, QLineEdit, QTabWidget, QScrollArea, QSplitter, QListWidget
+    QProgressBar, QLineEdit, QTabWidget, QScrollArea, QSplitter, QListWidget,
+    QFormLayout, QColorDialog
 )
 from PyQt5.QtGui import QImage, QPixmap, QFont
 from PyQt5.QtCore import QTimer, Qt, QThread, pyqtSignal
@@ -124,24 +125,23 @@ DTV_RESOLUTIONS = [
 # ─────────────────────────────────────────────────────────────
 class PythonChannelRelay(threading.Thread):
     """
-    Listens on TX_PORT for MPEG-TS datagrams.
+    Listens on tx_port for MPEG-TS datagrams.
     Applies TS-aware byte corruption based on link-budget lock%.
     Preserves 0x47 sync bytes so the decoder can still find packet boundaries.
-    Forwards corrupted datagrams to RX_PORT.
+    Forwards corrupted datagrams to rx_port.
     """
-    TX_PORT = 5005
-    RX_PORT = 5002
-
-    def __init__(self, get_lock_fn):
+    def __init__(self, get_lock_fn, tx_port=5005, rx_port=5002):
         super().__init__(daemon=True)
         self.get_lock = get_lock_fn
         self.running  = True
+        self.tx_port  = tx_port
+        self.rx_port  = rx_port
 
         self.rx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.rx_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         # Increase OS UDP receive buffer to ~8MB to prevent drops on high-bitrate 1080p
         self.rx_sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024)
-        self.rx_sock.bind(('127.0.0.1', self.TX_PORT))
+        self.rx_sock.bind(('127.0.0.1', self.tx_port))
         self.rx_sock.settimeout(0.05)
 
         self.tx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -201,7 +201,7 @@ class PythonChannelRelay(threading.Thread):
                 data = self._corrupt_ts(data, ber)
 
             try:
-                self.tx_sock.sendto(data, ('127.0.0.1', self.RX_PORT))
+                self.tx_sock.sendto(data, ('127.0.0.1', self.rx_port))
             except Exception:
                 pass
 
@@ -226,7 +226,9 @@ class MpegTsEncoderThread(QThread):
     """
     def __init__(self, video_file: str, width: int, height: int,
                  fps: int, bitrate_kbps: int, interlaced: bool,
-                 audio_codec: str = 'mp2', seek_seconds: float = 0.0):
+                 audio_codec: str = 'mp2', seek_seconds: float = 0.0,
+                 tx_port: int = 5005, crf: int = 22,
+                 custom_enc_args: str = "", preset: str = "medium"):
         super().__init__()
         self.video_file   = video_file
         self.width        = width
@@ -236,6 +238,10 @@ class MpegTsEncoderThread(QThread):
         self.interlaced   = interlaced
         self.audio_codec  = audio_codec
         self.seek_seconds = seek_seconds
+        self.tx_port      = tx_port
+        self.crf          = crf
+        self.custom_enc_args = custom_enc_args
+        self.preset       = preset
         self.running      = True
         self.proc         = None
         self.err_log      = subprocess.DEVNULL
@@ -302,12 +308,32 @@ class MpegTsEncoderThread(QThread):
         il_flags = (['-flags', '+ildct+ilme', '-alternate_scan', '1']
                     if self.interlaced and codec == 'mpeg2video' else [])
 
+        import shlex
+        custom_args_list = []
+        if self.custom_enc_args:
+            try:
+                custom_args_list = shlex.split(self.custom_enc_args)
+            except Exception as e:
+                print(f"[ENC] Error parsing custom encoder args: {e}")
+
+        # check if custom args overrides codec
+        for i, arg in enumerate(custom_args_list):
+            if arg in ('-vcodec', '-c:v') and i + 1 < len(custom_args_list):
+                codec = custom_args_list[i+1]
+
         common_enc = (
             ['-vcodec', codec, '-b:v', bv, '-maxrate', mv, '-bufsize', buf,
              '-g', str(gop), '-bf', '2']
             + il_flags
-            + ['-acodec', self.audio_codec, '-b:a', '192k', '-ar', '48000', '-ac', '2',
-               '-f', 'mpegts', 'pipe:1']
+        )
+        
+        if 'h264' in codec or 'x264' in codec:
+            common_enc += ['-crf', str(self.crf), '-preset', self.preset]
+
+        common_enc += (
+            ['-acodec', self.audio_codec, '-b:a', '192k', '-ar', '48000', '-ac', '2']
+            + custom_args_list
+            + ['-f', 'mpegts', 'pipe:1']
         )
 
         seek_opt = []
@@ -393,7 +419,7 @@ class MpegTsEncoderThread(QThread):
                 n_null = (TS_CHUNK - len(chunk)) // 188
                 chunk += (NULL_TS_PKT * n_null)[: TS_CHUNK - len(chunk)]
             try:
-                tx_sock.sendto(chunk, ('127.0.0.1', PythonChannelRelay.TX_PORT))
+                tx_sock.sendto(chunk, ('127.0.0.1', self.tx_port))
                 pkts_sent += 1
             except Exception:
                 pass
@@ -440,13 +466,15 @@ class MpegTsDecoderThread(QThread):
     frame_ready = pyqtSignal(bytes)   # raw RGB24 480x270
 
     def __init__(self, width: int, height: int, fps: int,
-                 deinterlace: bool = False, port: int = 5002):
+                 deinterlace: bool = False, port: int = 5002,
+                 custom_dec_args: str = ""):
         super().__init__()
         self.width       = width
         self.height      = height
         self.fps         = fps
         self.deinterlace = deinterlace
         self.port        = port
+        self.custom_dec_args = custom_dec_args
         self.running     = True
         # Decoder now outputs 960x540 for better scaling quality
         self.frame_size  = 960 * 540 * 3
@@ -487,34 +515,54 @@ class MpegTsDecoderThread(QThread):
         vf.append('scale=960:540:flags=lanczos')
         vf.append('format=rgb24')
         
+        import shlex
+        custom_args_list = []
+        if self.custom_dec_args:
+            try:
+                custom_args_list = shlex.split(self.custom_dec_args)
+            except Exception as e:
+                print(f"[DEC-V] Error parsing custom decoder args: {e}")
+
         return (
             ['ffmpeg', '-y', '-loglevel', 'error']
             + HW_DEC_FLAGS
-            + ['-fflags', 'nobuffer',
+            + ['-max_error_rate', '1.0',
+               '-fflags', 'nobuffer',
                '-err_detect', 'ignore_err',
                '-ec', 'deblock+favor_inter',
                '-analyzeduration', '2000000',
                '-probesize', '2000000',
-               '-f', 'mpegts', '-i', 'pipe:0',
-               '-map', '0:v?',
+               '-f', 'mpegts', '-i', 'pipe:0']
+            + custom_args_list
+            + ['-map', '0:v?',
                '-vf', ','.join(vf),
                '-f', 'rawvideo', '-pix_fmt', 'rgb24',
                'pipe:1']
         )
 
     def _audio_cmd(self):
-        return [
-            'ffmpeg', '-y', '-loglevel', 'error',
-            '-fflags', 'nobuffer',
-            '-err_detect', 'ignore_err',
-            '-analyzeduration', '2000000',
-            '-probesize', '2000000',
-            '-f', 'mpegts', '-i', 'pipe:0',
-            '-map', '0:a?',
-            '-f', 's16le', '-acodec', 'pcm_s16le',
-            '-ac', '2', '-ar', '48000',
-            'pipe:1'
-        ]
+        import shlex
+        custom_args_list = []
+        if self.custom_dec_args:
+            try:
+                custom_args_list = shlex.split(self.custom_dec_args)
+            except Exception as e:
+                print(f"[DEC-A] Error parsing custom decoder args: {e}")
+
+        return (
+            ['ffmpeg', '-y', '-loglevel', 'error',
+             '-max_error_rate', '1.0',
+             '-fflags', 'nobuffer',
+             '-err_detect', 'ignore_err',
+             '-analyzeduration', '2000000',
+             '-probesize', '2000000',
+             '-f', 'mpegts', '-i', 'pipe:0']
+            + custom_args_list
+            + ['-map', '0:a?',
+               '-f', 's16le', '-acodec', 'pcm_s16le',
+               '-ac', '2', '-ar', '48000',
+               'pipe:1']
+        )
 
     def _spawn(self, cmd, name):
         log_path = os.path.join(APP_DATA_DIR, f"decoder_{name}_stderr.log")
@@ -870,6 +918,7 @@ class DtvPlaygroundApp(QMainWindow):
         self.playlist        = []
         self.seek_seconds    = 0.0
         self.playback_paused = False
+        self.current_theme = 'dark'
         self.video_duration  = 0.0
         self.video_width     = 720
         self.video_height    = 480
@@ -922,9 +971,11 @@ class DtvPlaygroundApp(QMainWindow):
         self.on_impairment_changed()
 
         # ── Channel Relay ─────────────────────────────────────
-        self.channel_relay = PythonChannelRelay(get_lock_fn=self.get_lock_pct)
+        tx_port = int(self.tx_port_input.text()) if hasattr(self, 'tx_port_input') else 5005
+        rx_port = int(self.rx_port_input.text()) if hasattr(self, 'rx_port_input') else 5002
+        self.channel_relay = PythonChannelRelay(get_lock_fn=self.get_lock_pct, tx_port=tx_port, rx_port=rx_port)
         self.channel_relay.start()
-        print(f"[RELAY] TX:{PythonChannelRelay.TX_PORT} → RX:{PythonChannelRelay.RX_PORT}")
+        print(f"[RELAY] TX:{tx_port} → RX:{rx_port}")
 
         # ── Timers ────────────────────────────────────────────
         self.timer_tx = QTimer()
@@ -969,17 +1020,25 @@ class DtvPlaygroundApp(QMainWindow):
     # ── Startup helpers ────────────────────────────────────────
     def _start_encoder(self):
         if self.mpeg_encoder:
-            self.mpeg_encoder.stop()
-            self.mpeg_encoder = None
+            self._safe_stop_thread('mpeg_encoder')
         
         seek_sec = getattr(self, 'seek_seconds', 0.0)
+        tx_port = int(self.tx_port_input.text()) if hasattr(self, 'tx_port_input') else 5005
+        crf = self.custom_crf_slider.value() if hasattr(self, 'custom_crf_slider') else 22
+        preset = self.custom_preset_combo.currentText() if hasattr(self, 'custom_preset_combo') else "medium"
+        custom_enc_args = self.custom_enc_args_input.text() if hasattr(self, 'custom_enc_args_input') else ""
+
         self.mpeg_encoder = MpegTsEncoderThread(
             video_file=self.video_file,
             width=self.video_width, height=self.video_height,
             fps=self.fps, bitrate_kbps=self.bitrate_kbps,
             interlaced=self.interlaced,
             audio_codec=self.audio_codec,
-            seek_seconds=seek_sec
+            seek_seconds=seek_sec,
+            tx_port=tx_port,
+            crf=crf,
+            custom_enc_args=custom_enc_args,
+            preset=preset
         )
         self.mpeg_encoder.start()
         # TX display preview (small ffmpeg for UI only)
@@ -987,14 +1046,18 @@ class DtvPlaygroundApp(QMainWindow):
 
     def _start_decoder(self):
         if self.mpeg_decoder:
-            self.mpeg_decoder.stop()
-            self.mpeg_decoder = None
+            self._safe_stop_thread('mpeg_decoder')
         self.last_decoded    = None
         self.last_frame_recv = 0.0
         self.decoder_start_time = time.time()
+        
+        rx_port = int(self.rx_port_input.text()) if hasattr(self, 'rx_port_input') else 5002
+        custom_dec_args = self.custom_dec_args_input.text() if hasattr(self, 'custom_dec_args_input') else ""
+
         self.mpeg_decoder = MpegTsDecoderThread(
             width=self.video_width, height=self.video_height,
-            fps=self.fps, deinterlace=self.deinterlace_rx
+            fps=self.fps, deinterlace=self.deinterlace_rx,
+            port=rx_port, custom_dec_args=custom_dec_args
         )
         is_unmuted = self.btn_mute_rx.isChecked() if hasattr(self, 'btn_mute_rx') else True
         self.mpeg_decoder.vol_level = (self.vol_slider.value() if is_unmuted else 0) / 100.0
@@ -1051,8 +1114,88 @@ class DtvPlaygroundApp(QMainWindow):
     def _start_aplay(self):
         pass
 
+    def on_tx_preview_enable_changed(self, state):
+        enabled = (state == Qt.Checked)
+        if enabled:
+            self._start_preview()
+        else:
+            self._safe_stop_thread('preview_thread')
+            if self.preview_proc:
+                try:
+                    if self.preview_proc.stdin: self.preview_proc.stdin.close()
+                except Exception: pass
+                try:
+                    if self.preview_proc.stdout: self.preview_proc.stdout.close()
+                except Exception: pass
+                try:
+                    self.preview_proc.terminate()
+                    self.preview_proc.wait(timeout=0.2)
+                except Exception: pass
+                self.preview_proc = None
+            self.orig_screen.setText("Preview Disabled")
+            self.orig_screen.setStyleSheet("background:#000; color:#555; font-size: 14px; font-weight: bold; border:1px solid #30363d;")
+
+    def on_rx_preview_enable_changed(self, state):
+        enabled = (state == Qt.Checked)
+        if not enabled:
+            self.recv_screen.setText("Preview Disabled")
+            self.recv_screen.setStyleSheet("background:#000; color:#555; font-size: 14px; font-weight: bold; border:1px solid #30363d;")
+        else:
+            if self._lock_pct == 0:
+                self._draw_no_signal()
+            else:
+                self.recv_screen.setStyleSheet("background:#000; border:1px solid #30363d;")
+
+    def _safe_stop_thread(self, attr_name):
+        thread = getattr(self, attr_name, None)
+        if thread:
+            try:
+                thread.stop()
+                thread.wait()
+            except Exception:
+                pass
+            if not hasattr(self, '_old_threads'):
+                self._old_threads = []
+            self._old_threads.append(thread)
+            setattr(self, attr_name, None)
+        if hasattr(self, '_old_threads'):
+            self._old_threads = [t for t in self._old_threads if not t.isFinished()]
+
+    def on_toggle_theme(self):
+        if self.current_theme == 'dark':
+            self.current_theme = 'light'
+            if hasattr(self, 'btn_toggle_theme'):
+                self.btn_toggle_theme.setText("🌓 Dark Mode")
+        else:
+            self.current_theme = 'dark'
+            if hasattr(self, 'btn_toggle_theme'):
+                self.btn_toggle_theme.setText("🌓 Light Mode")
+        self._apply_stylesheet(self.current_theme)
+
+    def on_theme_changed(self, idx):
+        if idx == 3:
+            if hasattr(self, 'custom_theme_widget'):
+                self.custom_theme_widget.setVisible(True)
+        else:
+            if hasattr(self, 'custom_theme_widget'):
+                self.custom_theme_widget.setVisible(False)
+
+    def pick_bg_color(self):
+        color = QColorDialog.getColor(QtGui.QColor(self.custom_bg_edit.text()), self)
+        if color.isValid():
+            self.custom_bg_edit.setText(color.name())
+
+    def pick_border_color(self):
+        color = QColorDialog.getColor(QtGui.QColor(self.custom_border_edit.text()), self)
+        if color.isValid():
+            self.custom_border_edit.setText(color.name())
+
+    def on_custom_theme_changed(self, *args):
+        if self._lock_pct == 0:
+            self.update_rx_display()
+
     def _restart_pipeline(self, restart_decoder=True):
-        """Stop+restart encoder and decoder when params change."""
+        """Stop+restart relay, encoder and decoder when params change."""
         if self._is_restarting:
             self._pending_restart = True
             self._pending_restart_dec = restart_decoder
@@ -1072,30 +1215,43 @@ class DtvPlaygroundApp(QMainWindow):
         old_dec = self.mpeg_decoder if restart_decoder else None
         old_prev = getattr(self, 'preview_thread', None)
         old_prev_proc = getattr(self, 'preview_proc', None)
+        old_relay = self.channel_relay
 
         self.mpeg_encoder = None
         if restart_decoder:
             self.mpeg_decoder = None
         self.preview_thread = None
         self.preview_proc = None
+        self.channel_relay = None
         
         self._next_restart_decoder = restart_decoder
 
         def stop_worker():
             # Stop processes in background to prevent UI hangs
             if old_enc:
-                try: old_enc.stop()
+                try: 
+                    old_enc.stop()
+                    old_enc.wait()
                 except Exception: pass
             if old_dec:
-                try: old_dec.stop()
+                try: 
+                    old_dec.stop()
+                    old_dec.wait()
                 except Exception: pass
             if old_prev:
-                try: old_prev.stop()
+                try: 
+                    old_prev.stop()
+                    old_prev.wait()
                 except Exception: pass
             if old_prev_proc:
                 try:
                     old_prev_proc.terminate()
                     old_prev_proc.wait(timeout=1)
+                except Exception: pass
+            if old_relay:
+                try:
+                    old_relay.stop()
+                    old_relay.join(timeout=0.2)
                 except Exception: pass
             
             # Notify GUI thread to start new processes safely
@@ -1105,6 +1261,11 @@ class DtvPlaygroundApp(QMainWindow):
 
     def _on_restart_complete(self):
         # Safely instantiate QThreads in the main GUI thread
+        tx_port = int(self.tx_port_input.text()) if hasattr(self, 'tx_port_input') else 5005
+        rx_port = int(self.rx_port_input.text()) if hasattr(self, 'rx_port_input') else 5002
+        self.channel_relay = PythonChannelRelay(get_lock_fn=self.get_lock_pct, tx_port=tx_port, rx_port=rx_port)
+        self.channel_relay.start()
+
         if self._next_restart_decoder:
             self._start_decoder()
         self._start_encoder()
@@ -1123,44 +1284,85 @@ class DtvPlaygroundApp(QMainWindow):
     # ─────────────────────────────────────────────────────────────
     #  STYLESHEET
     # ─────────────────────────────────────────────────────────────
-    def _apply_stylesheet(self):
-        self.setStyleSheet("""
-            QMainWindow, QWidget { background-color: #0d1117; color: #e6edf3;
-                                   font-family: 'DejaVu Sans', sans-serif; }
-            QGroupBox { border: 1px solid #30363d; border-radius: 6px;
-                        margin-top: 8px; font-weight: bold; color: #79c0ff;
-                        padding-top: 4px; }
-            QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }
-            QLabel { font-size: 12px; color: #c9d1d9; }
-            QPushButton { background-color: #21262d; border: 1px solid #30363d;
-                          border-radius: 5px; padding: 6px 10px; font-weight: bold; color: #c9d1d9; }
-            QPushButton:hover { background-color: #30363d; border-color: #58a6ff; }
-            QPushButton:pressed { background-color: #161b22; }
-            QSlider::groove:horizontal { border: 1px solid #30363d; height: 5px;
-                                         background: #21262d; border-radius: 2px; }
-            QSlider::handle:horizontal { background: #58a6ff; width: 13px;
-                                         margin: -4px 0; border-radius: 6px; }
-            QSlider::handle:horizontal:hover { background: #79c0ff; }
-            QComboBox { background-color: #21262d; border: 1px solid #30363d;
-                        border-radius: 4px; padding: 4px 8px; color: #c9d1d9; }
-            QComboBox QAbstractItemView { background: #21262d; selection-background-color: #1f6feb; }
-            QProgressBar { border: 1px solid #30363d; border-radius: 4px; text-align: center;
-                           background-color: #21262d; color: #c9d1d9; font-weight: bold; }
-            QProgressBar::chunk { background-color: #238636; border-radius: 3px; }
-            QLineEdit { background-color: #21262d; border: 1px solid #30363d;
-                        border-radius: 4px; padding: 4px; color: #c9d1d9; }
-            QCheckBox { color: #c9d1d9; }
-            QCheckBox::indicator { width: 14px; height: 14px;
-                                   border: 1px solid #58a6ff; border-radius: 3px; }
-            QCheckBox::indicator:checked { background-color: #1f6feb; }
-            QTabWidget::pane { border: 1px solid #30363d; background: #0d1117; }
-            QTabBar::tab { background: #21262d; color: #8b949e; padding: 8px 14px;
-                           border-top-left-radius: 4px; border-top-right-radius: 4px;
-                           margin-right: 2px; font-size: 11px; }
-            QTabBar::tab:selected { background: #1f6feb; color: #fff; }
-            QTabBar::tab:hover { background: #30363d; color: #c9d1d9; }
-            QScrollArea { border: none; }
-        """)
+    def _apply_stylesheet(self, theme='dark'):
+        if theme == 'dark':
+            self.setStyleSheet("""
+                QMainWindow, QWidget { background-color: #0d1117; color: #e6edf3;
+                                       font-family: 'DejaVu Sans', sans-serif; }
+                QGroupBox { border: 1px solid #30363d; border-radius: 6px;
+                            margin-top: 8px; font-weight: bold; color: #79c0ff;
+                            padding-top: 4px; }
+                QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }
+                QLabel { font-size: 12px; color: #c9d1d9; }
+                QLabel#metrics_lbl { background-color: #161b22; color: #8b949e; border-top: 1px solid #30363d; font-family: monospace; font-size: 11px; padding: 4px 8px; }
+                QPushButton { background-color: #21262d; border: 1px solid #30363d;
+                              border-radius: 5px; padding: 6px 10px; font-weight: bold; color: #c9d1d9; }
+                QPushButton:hover { background-color: #30363d; border-color: #58a6ff; }
+                QPushButton:pressed { background-color: #161b22; }
+                QSlider::groove:horizontal { border: 1px solid #30363d; height: 5px;
+                                             background: #21262d; border-radius: 2px; }
+                QSlider::handle:horizontal { background: #58a6ff; width: 13px;
+                                             margin: -4px 0; border-radius: 6px; }
+                QSlider::handle:horizontal:hover { background: #79c0ff; }
+                QComboBox { background-color: #21262d; border: 1px solid #30363d;
+                            border-radius: 4px; padding: 4px 8px; color: #c9d1d9; }
+                QComboBox QAbstractItemView { background: #21262d; selection-background-color: #1f6feb; }
+                QProgressBar { border: 1px solid #30363d; border-radius: 4px; text-align: center;
+                               background-color: #21262d; color: #c9d1d9; font-weight: bold; }
+                QProgressBar::chunk { background-color: #238636; border-radius: 3px; }
+                QLineEdit { background-color: #21262d; border: 1px solid #30363d;
+                            border-radius: 4px; padding: 4px; color: #c9d1d9; }
+                QCheckBox { color: #c9d1d9; }
+                QCheckBox::indicator { width: 14px; height: 14px;
+                                       border: 1px solid #58a6ff; border-radius: 3px; }
+                QCheckBox::indicator:checked { background-color: #1f6feb; }
+                QTabWidget::pane { border: 1px solid #30363d; background: #0d1117; }
+                QTabBar::tab { background: #21262d; color: #8b949e; padding: 8px 14px;
+                               border-top-left-radius: 4px; border-top-right-radius: 4px;
+                               margin-right: 2px; font-size: 11px; }
+                QTabBar::tab:selected { background: #1f6feb; color: #fff; }
+                QTabBar::tab:hover { background: #30363d; color: #c9d1d9; }
+                QScrollArea { border: none; }
+            """)
+        else:
+            self.setStyleSheet("""
+                QMainWindow, QWidget { background-color: #f6f8fa; color: #24292f;
+                                       font-family: 'DejaVu Sans', sans-serif; }
+                QGroupBox { border: 1px solid #d0d7de; border-radius: 6px;
+                            margin-top: 8px; font-weight: bold; color: #0969da;
+                            padding-top: 4px; }
+                QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }
+                QLabel { font-size: 12px; color: #24292f; }
+                QLabel#metrics_lbl { background-color: #ffffff; color: #57606a; border-top: 1px solid #d0d7de; font-family: monospace; font-size: 11px; padding: 4px 8px; }
+                QPushButton { background-color: #f6f8fa; border: 1px solid #d0d7de;
+                              border-radius: 5px; padding: 6px 10px; font-weight: bold; color: #24292f; }
+                QPushButton:hover { background-color: #eaeef2; border-color: #0969da; }
+                QPushButton:pressed { background-color: #eaeef2; }
+                QSlider::groove:horizontal { border: 1px solid #d0d7de; height: 5px;
+                                             background: #eaeef2; border-radius: 2px; }
+                QSlider::handle:horizontal { background: #0969da; width: 13px;
+                                             margin: -4px 0; border-radius: 6px; }
+                QSlider::handle:horizontal:hover { background: #2da44e; }
+                QComboBox { background-color: #ffffff; border: 1px solid #d0d7de;
+                            border-radius: 4px; padding: 4px 8px; color: #24292f; }
+                QComboBox QAbstractItemView { background: #ffffff; selection-background-color: #0969da; }
+                QProgressBar { border: 1px solid #d0d7de; border-radius: 4px; text-align: center;
+                               background-color: #ffffff; color: #24292f; font-weight: bold; }
+                QProgressBar::chunk { background-color: #2da44e; border-radius: 3px; }
+                QLineEdit { background-color: #ffffff; border: 1px solid #d0d7de;
+                            border-radius: 4px; padding: 4px; color: #24292f; }
+                QCheckBox { color: #24292f; }
+                QCheckBox::indicator { width: 14px; height: 14px;
+                                       border: 1px solid #0969da; border-radius: 3px; }
+                QCheckBox::indicator:checked { background-color: #0969da; }
+                QTabWidget::pane { border: 1px solid #d0d7de; background: #ffffff; }
+                QTabBar::tab { background: #eaeef2; color: #57606a; padding: 8px 14px;
+                               border-top-left-radius: 4px; border-top-right-radius: 4px;
+                               margin-right: 2px; font-size: 11px; }
+                QTabBar::tab:selected { background: #0969da; color: #fff; }
+                QTabBar::tab:hover { background: #d0d7de; color: #24292f; }
+                QScrollArea { border: none; }
+            """)
 
     # ─────────────────────────────────────────────────────────────
     #  UI CONSTRUCTION
@@ -1175,6 +1377,12 @@ class DtvPlaygroundApp(QMainWindow):
         ttl.setFont(QFont("DejaVu Sans", 15, QFont.Bold))
         ttl.setStyleSheet("color: #58a6ff; padding: 2px;")
         hdr.addWidget(ttl); hdr.addStretch()
+        
+        self.btn_toggle_theme = QPushButton("🌓 Light Mode")
+        self.btn_toggle_theme.setFixedWidth(100)
+        self.btn_toggle_theme.clicked.connect(self.on_toggle_theme)
+        hdr.addWidget(self.btn_toggle_theme)
+
         hdr.addWidget(QLabel("CH:")); self.num_input = QLineEdit("7.1")
         self.num_input.setMinimumWidth(45); self.num_input.textChanged.connect(self.on_guide_changed)
         hdr.addWidget(self.num_input); hdr.addWidget(QLabel("Name:"))
@@ -1200,9 +1408,7 @@ class DtvPlaygroundApp(QMainWindow):
         vbox.addWidget(spl, 1)
 
         self.metrics_lbl = QLabel("Initializing MPEG-2 TS pipeline...")
-        self.metrics_lbl.setStyleSheet(
-            "background:#161b22; padding:4px 8px; border-top:1px solid #30363d;"
-            " font-family:monospace; font-size:11px; color:#8b949e;")
+        self.metrics_lbl.setObjectName("metrics_lbl")
         vbox.addWidget(self.metrics_lbl)
 
         root.setLayout(vbox)
@@ -1226,22 +1432,21 @@ class DtvPlaygroundApp(QMainWindow):
         self.preset_combo = QComboBox()
         self.preset_combo.addItems([
             "-- Select Preset --",
-            "1. ATSC 480i Local (UHF, 10 km, Set-top)",
-            "2. DVB-T 720p Rooftop (UHF, 25 km)",
-            "3. DVB-S2 1080i Satellite (Ku-Band, 38000 km)",
-            "4. J.83B 1080p Cable (UHF, 2 km)",
-            "5. Tropospheric DX 480i (VHF, 120 km, stable)",
-            "6. Sporadic E-Skip 720p (VHF, 800 km, fading)",
-            "7. ATSC 1080i Fringe (VHF, 75 km, Set-top)",
-            "8. DVB-T2 1080p Modern (UHF, 15 km)",
-            "9. Ku-Band Satellite Rain Fade (Ku-Band, 38000 km, Heavy Rain)",
-            "10. J.83B Cable High Noise (J.83B, UHF, 5 km)",
-            "11. Severe Multipath Ghosting (ATSC, VHF, 15 km)",
-            "12. Datamoshing Cliff Edge (DVB-T2, UHF, 42 km)",
-            "13. Deep Fried Datamosh (High Error Rate)"
+            "1. ATSC 480i Local (UHF, 10 km, Set-top)"
         ])
         self.preset_combo.currentIndexChanged.connect(self.on_preset_changed)
-        pv.addWidget(self.preset_combo); pb.setLayout(pv); v.addWidget(pb)
+        pv.addWidget(self.preset_combo)
+
+        ph = QHBoxLayout()
+        self.btn_save_preset = QPushButton("Save Preset...")
+        self.btn_load_preset = QPushButton("Load Preset...")
+        self.btn_save_preset.clicked.connect(self.on_save_preset)
+        self.btn_load_preset.clicked.connect(self.on_load_preset)
+        ph.addWidget(self.btn_save_preset)
+        ph.addWidget(self.btn_load_preset)
+        pv.addLayout(ph)
+
+        pb.setLayout(pv); v.addWidget(pb)
 
         # Standard
         sb_box = QGroupBox("DTV Standard / Modulation"); sv = QVBoxLayout()
@@ -1351,10 +1556,57 @@ class DtvPlaygroundApp(QMainWindow):
 
         sk = QGroupBox("Receiver Box Theme"); sv = QVBoxLayout()
         self.theme_combo = QComboBox()
-        self.theme_combo.addItems(["ATSC/DVB-T Terrestrial Set-top Box",
-                                    "DVB-S2 Satellite Receiver Box",
-                                    "Digital Cable Set-top Box (J.83B)"])
-        sv.addWidget(self.theme_combo); sk.setLayout(sv); v.addWidget(sk)
+        self.theme_combo.addItems([
+            "ATSC/DVB-T Terrestrial Set-top Box",
+            "DVB-S2 Satellite Receiver Box",
+            "Digital Cable Set-top Box (J.83B)",
+            "Custom Designer Theme"
+        ])
+        self.theme_combo.currentIndexChanged.connect(self.on_theme_changed)
+        self.theme_combo.currentIndexChanged.connect(self.on_custom_theme_changed)
+        sv.addWidget(self.theme_combo)
+
+        # Custom theme widget designer
+        self.custom_theme_widget = QWidget()
+        custom_layout = QFormLayout()
+        custom_layout.setContentsMargins(0, 4, 0, 0)
+        custom_layout.setSpacing(4)
+
+        # Bg color row
+        self.custom_bg_edit = QLineEdit("#0f0f12")
+        self.custom_bg_edit.textChanged.connect(self.on_custom_theme_changed)
+        btn_bg_color = QPushButton("Pick")
+        btn_bg_color.clicked.connect(self.pick_bg_color)
+        bg_row = QHBoxLayout()
+        bg_row.addWidget(self.custom_bg_edit)
+        bg_row.addWidget(btn_bg_color)
+        custom_layout.addRow("Background Color:", bg_row)
+
+        # Border color row
+        self.custom_border_edit = QLineEdit("#dc4646")
+        self.custom_border_edit.textChanged.connect(self.on_custom_theme_changed)
+        btn_border_color = QPushButton("Pick")
+        btn_border_color.clicked.connect(self.pick_border_color)
+        border_row = QHBoxLayout()
+        border_row.addWidget(self.custom_border_edit)
+        border_row.addWidget(btn_border_color)
+        custom_layout.addRow("Border Color:", border_row)
+
+        # Title
+        self.custom_title_edit = QLineEdit("CUSTOM BOX  —  NO SIGNAL")
+        self.custom_title_edit.textChanged.connect(self.on_custom_theme_changed)
+        custom_layout.addRow("Title Text:", self.custom_title_edit)
+
+        # Message
+        self.custom_msg_edit = QLineEdit("Check your tuner settings or coaxial cable connection.")
+        self.custom_msg_edit.textChanged.connect(self.on_custom_theme_changed)
+        custom_layout.addRow("Message Text:", self.custom_msg_edit)
+
+        self.custom_theme_widget.setLayout(custom_layout)
+        self.custom_theme_widget.setVisible(False)
+        sv.addWidget(self.custom_theme_widget)
+
+        sk.setLayout(sv); v.addWidget(sk)
         v.addStretch(); w.setLayout(v); return w
 
     # ── TAB 3: Media & Quality ────────────────────────────────
@@ -1467,6 +1719,56 @@ class DtvPlaygroundApp(QMainWindow):
         self.rec_lbl = QLabel("Not recording"); self.rec_lbl.setStyleSheet("color:#8b949e;")
         rv.addWidget(self.rec_lbl)
         rx.setLayout(rv); v.addWidget(rx)
+
+        # Custom FFmpeg & Ports Settings
+        cust = QGroupBox("Custom FFmpeg & UDP Port Settings"); cv = QFormLayout(); cv.setSpacing(4)
+        
+        # CRF
+        self.custom_crf_slider = QSlider(Qt.Horizontal)
+        self.custom_crf_slider.setRange(10, 51); self.custom_crf_slider.setValue(22)
+        self.custom_crf_lbl = QLabel("22")
+        crf_h = QHBoxLayout()
+        crf_h.addWidget(self.custom_crf_slider)
+        crf_h.addWidget(self.custom_crf_lbl)
+        self.custom_crf_slider.valueChanged.connect(lambda val: self.custom_crf_lbl.setText(str(val)))
+        self.custom_crf_slider.valueChanged.connect(lambda _: self._restart_pipeline())
+        cv.addRow("Video CRF:", crf_h)
+
+        # Preset
+        self.custom_preset_combo = QComboBox()
+        self.custom_preset_combo.addItems([
+            "ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow"
+        ])
+        self.custom_preset_combo.setCurrentText("medium")
+        self.custom_preset_combo.currentIndexChanged.connect(lambda _: self._restart_pipeline())
+        cv.addRow("Encoder Preset:", self.custom_preset_combo)
+
+        # TX Port
+        self.tx_port_input = QLineEdit("5005")
+        self.tx_port_input.setValidator(QtGui.QIntValidator(1024, 65535))
+        self.tx_port_input.editingFinished.connect(self._restart_pipeline)
+        cv.addRow("TX Port (UDP):", self.tx_port_input)
+
+        # RX Port
+        self.rx_port_input = QLineEdit("5002")
+        self.rx_port_input.setValidator(QtGui.QIntValidator(1024, 65535))
+        self.rx_port_input.editingFinished.connect(self._restart_pipeline)
+        cv.addRow("RX Port (UDP):", self.rx_port_input)
+
+        # Custom Encoder Args
+        self.custom_enc_args_input = QLineEdit("")
+        self.custom_enc_args_input.setPlaceholderText("e.g. -tune animation -profile:v main")
+        self.custom_enc_args_input.editingFinished.connect(self._restart_pipeline)
+        cv.addRow("Extra Encoder Args:", self.custom_enc_args_input)
+
+        # Custom Decoder Args
+        self.custom_dec_args_input = QLineEdit("")
+        self.custom_dec_args_input.setPlaceholderText("e.g. -threads 4")
+        self.custom_dec_args_input.editingFinished.connect(self._restart_pipeline)
+        cv.addRow("Extra Decoder Args:", self.custom_dec_args_input)
+
+        cust.setLayout(cv); v.addWidget(cust)
+
         v.addStretch()
 
         inn.setLayout(v); sc.setWidget(inn)
@@ -1527,6 +1829,11 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         
         # Preview Audio controls
         prev_aud_row = QHBoxLayout()
+        self.chk_enable_tx_preview = QCheckBox("Enable TX Preview")
+        self.chk_enable_tx_preview.setChecked(True)
+        self.chk_enable_tx_preview.stateChanged.connect(self.on_tx_preview_enable_changed)
+        prev_aud_row.addWidget(self.chk_enable_tx_preview)
+
         self.btn_mute_preview = QCheckBox("Play Preview Audio (direct)")
         self.btn_mute_preview.setChecked(False) # default to False (muted)
         self.btn_mute_preview.stateChanged.connect(self.on_preview_mute_changed)
@@ -1556,6 +1863,11 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         
         # RX Audio controls
         rx_aud_row = QHBoxLayout()
+        self.chk_enable_rx_preview = QCheckBox("Enable RX Preview")
+        self.chk_enable_rx_preview.setChecked(True)
+        self.chk_enable_rx_preview.stateChanged.connect(self.on_rx_preview_enable_changed)
+        rx_aud_row.addWidget(self.chk_enable_rx_preview)
+
         self.btn_mute_rx = QCheckBox("Play RX Audio")
         self.btn_mute_rx.setChecked(True) # default to True (unmuted)
         self.btn_mute_rx.stateChanged.connect(self.on_rx_mute_changed)
@@ -1638,6 +1950,11 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         self.video_width  = w
         self.video_height = h
         self.fps          = fps_def
+        
+        self.fps_slider.blockSignals(True)
+        self.interlace_checkbox.blockSignals(True)
+        self.jpg_slider.blockSignals(True)
+        
         self.fps_slider.setValue(fps_def)
         if not il:
             self.interlace_checkbox.setChecked(False)
@@ -1647,6 +1964,10 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         bitrate_slider_val = [60, 65, 80, 88, 92, 20][idx]
         self.jpg_slider.setValue(bitrate_slider_val)
         self.bitrate_kbps = int(500.0 * (50.0 ** ((bitrate_slider_val - 10) / 90.0)))
+        
+        self.fps_slider.blockSignals(False)
+        self.interlace_checkbox.blockSignals(False)
+        self.jpg_slider.blockSignals(False)
         
         self._restart_pipeline()
 
@@ -1834,10 +2155,24 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
                 self.timeline_slider.setEnabled(False)
                 self.time_lbl.setText("00:00 / 00:00")
 
+        if hasattr(self, 'lbl_player_info'):
+            dur_min, dur_sec = divmod(int(self.video_duration), 60)
+            dur_str = f"{dur_min:02d}:{dur_sec:02d}"
+            info_text = (
+                f"Video: {self.file_v_res} @ {self.file_v_fps}fps ({self.file_v_codec}) | "
+                f"Audio: {self.file_a_codec} ({self.file_a_rate}) | Dur: {dur_str}"
+            )
+            self.lbl_player_info.setText(info_text)
+
     def _build_player_controls(self):
         player_box = QGroupBox("Media Player Control Room")
         pv = QVBoxLayout(); pv.setSpacing(4)
         
+        # File info label
+        self.lbl_player_info = QLabel("No active video file (playing synthetic pattern)")
+        self.lbl_player_info.setStyleSheet("color:#8b949e; font-size:11px; font-style:italic;")
+        pv.addWidget(self.lbl_player_info)
+
         # Timeline row
         time_row = QHBoxLayout()
         self.btn_play_pause = QPushButton("Pause")
@@ -1879,6 +2214,10 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         p_nav_row.addWidget(btn_prev)
         p_nav_row.addWidget(btn_next)
         p_btn_col.addLayout(p_nav_row)
+
+        self.chk_auto_advance = QCheckBox("Auto-Advance")
+        self.chk_auto_advance.setChecked(True)
+        p_btn_col.addWidget(self.chk_auto_advance)
         
         playlist_row.addLayout(p_btn_col)
         pv.addLayout(playlist_row)
@@ -1905,9 +2244,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             else:
                 # Windows fallback: stop processes to pause
                 if self.mpeg_encoder:
-                    try: self.mpeg_encoder.stop()
-                    except Exception: pass
-                    self.mpeg_encoder = None
+                    self._safe_stop_thread('mpeg_encoder')
                 if self.preview_proc:
                     try:
                         self.preview_proc.terminate()
@@ -1963,8 +2300,25 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         if not hasattr(self, 'playlist') or not self.playlist: return
         row = self.playlist_widget.currentRow()
         if 0 <= row < len(self.playlist):
+            was_playing = (self.playlist[row] == self.video_file)
             self.playlist.pop(row)
             self.playlist_widget.takeItem(row)
+            
+            if not self.playlist:
+                self.video_file = ''
+                self.file_lbl.setText("Source: SMPTE test pattern (synthetic)")
+                if hasattr(self, 'lbl_player_info'):
+                    self.lbl_player_info.setText("No active video file (playing synthetic pattern)")
+                self.timeline_slider.setRange(0, 100)
+                self.timeline_slider.setEnabled(False)
+                self.time_lbl.setText("00:00 / 00:00")
+                self.seek_seconds = 0.0
+                self.play_start_offset = 0.0
+                self.play_start_time = time.time()
+                self._restart_pipeline()
+            elif was_playing:
+                new_idx = min(row, len(self.playlist) - 1)
+                self.play_playlist_index(new_idx)
 
     def on_playlist_item_double_clicked(self, item):
         row = self.playlist_widget.row(item)
@@ -2014,22 +2368,14 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
                    self.tx_power_slider, self.range_slider, self.lna_checkbox,
                    self.prop_combo, self.theme_combo, self.res_combo, self.interlace_checkbox,
                    self.audio_codec_combo, self.noise_slider, self.freq_slider,
-                   self.time_slider, self.fade_slider]
+                   self.time_slider, self.fade_slider, self.fps_slider, self.jpg_slider,
+                   self.custom_crf_slider, self.custom_preset_combo,
+                   self.tx_port_input, self.rx_port_input,
+                   self.custom_enc_args_input, self.custom_dec_args_input]
         for w in widgets: w.blockSignals(True)
 
         cfg = {
             1: dict(std=0, band=1, wx=0, pwr=40, dist=10,  lna=True,  prop=0, theme=0, res=0, il=True,  acodec=1, noise=0, freq=0, time=1000, fade=0),
-            2: dict(std=4, band=1, wx=0, pwr=43, dist=25,  lna=True,  prop=0, theme=0, res=2, il=False, acodec=0, noise=0, freq=0, time=1000, fade=0),
-            3: dict(std=1, band=3, wx=0, pwr=60, dist=38000, lna=True, prop=0, theme=1, res=3, il=True,  acodec=2, noise=0, freq=0, time=1000, fade=0),
-            4: dict(std=2, band=1, wx=0, pwr=38, dist=2,   lna=False, prop=0, theme=2, res=4, il=False, acodec=1, noise=0, freq=0, time=1000, fade=0),
-            5: dict(std=4, band=0, wx=0, pwr=55, dist=120, lna=True,  prop=1, theme=0, res=0, il=True,  acodec=0, noise=0, freq=0, time=1000, fade=0),
-            6: dict(std=4, band=0, wx=0, pwr=65, dist=800, lna=True,  prop=2, theme=0, res=2, il=False, acodec=0, noise=0, freq=0, time=1000, fade=0),
-            7: dict(std=0, band=0, wx=0, pwr=45, dist=75,  lna=True,  prop=0, theme=0, res=3, il=True,  acodec=1, noise=0, freq=0, time=1000, fade=0),
-            8: dict(std=3, band=1, wx=0, pwr=42, dist=15,  lna=True,  prop=0, theme=0, res=4, il=False, acodec=2, noise=0, freq=0, time=1000, fade=0),
-            9: dict(std=1, band=3, wx=3, pwr=65, dist=38000, lna=True, prop=0, theme=1, res=3, il=True,  acodec=2, noise=0, freq=0, time=1000, fade=0),
-            10: dict(std=2, band=1, wx=0, pwr=35, dist=5,   lna=False, prop=0, theme=2, res=4, il=False, acodec=1, noise=35, freq=0, time=1000, fade=0),
-            11: dict(std=0, band=0, wx=0, pwr=40, dist=15,  lna=True,  prop=0, theme=0, res=3, il=True,  acodec=1, noise=0, freq=0, time=1000, fade=45),
-            12: dict(std=3, band=1, wx=0, pwr=40, dist=42,  lna=True,  prop=0, theme=0, res=2, il=False, acodec=2, noise=0, freq=0, time=1000, fade=0),
         }.get(idx, {})
 
         if cfg:
@@ -2060,12 +2406,139 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         _, w, h, _, fps_def = DTV_RESOLUTIONS[res_idx]
         self.video_width = w; self.video_height = h; self.fps = fps_def
         self.interlaced = self.interlace_checkbox.isChecked()
+        self.fps_slider.blockSignals(True)
         self.fps_slider.setValue(fps_def)
+        self.fps_slider.blockSignals(False)
         if self.gr_tb:
             try: self.gr_tb.set_active_standard(self.std_combo.currentIndex())
             except Exception: pass
+        
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.setCurrentIndex(0)
+        self.preset_combo.blockSignals(False)
+        
         self.on_impairment_changed()
         self._restart_pipeline()
+
+    def on_save_preset(self):
+        fname, _ = QFileDialog.getSaveFileName(
+            self, "Save Preset", os.path.expanduser('~'), "DTV Preset (*.json)"
+        )
+        if not fname: return
+        if not fname.lower().endswith('.json'):
+            fname += '.json'
+        
+        cfg = {
+            'std': self.std_combo.currentIndex(),
+            'band': self.freq_band_combo.currentIndex(),
+            'wx': self.weather_combo.currentIndex(),
+            'pwr': self.tx_power_slider.value(),
+            'dist': self.range_slider.value(),
+            'lna': self.lna_checkbox.isChecked(),
+            'prop': self.prop_combo.currentIndex(),
+            'theme': self.theme_combo.currentIndex(),
+            'res': self.res_combo.currentIndex(),
+            'il': self.interlace_checkbox.isChecked(),
+            'acodec': self.audio_codec_combo.currentIndex(),
+            'noise': self.noise_slider.value(),
+            'freq': self.freq_slider.value(),
+            'time': self.time_slider.value(),
+            'fade': self.fade_slider.value(),
+            'fps': self.fps_slider.value(),
+            'bitrate_val': self.jpg_slider.value(),
+            'custom_bg': self.custom_bg_edit.text(),
+            'custom_border': self.custom_border_edit.text(),
+            'custom_title': self.custom_title_edit.text(),
+            'custom_msg': self.custom_msg_edit.text(),
+            'custom_crf': self.custom_crf_slider.value(),
+            'custom_preset': self.custom_preset_combo.currentText(),
+            'tx_port': self.tx_port_input.text(),
+            'rx_port': self.rx_port_input.text(),
+            'custom_enc_args': self.custom_enc_args_input.text(),
+            'custom_dec_args': self.custom_dec_args_input.text()
+        }
+        
+        try:
+            with open(fname, 'w') as f:
+                json.dump(cfg, f, indent=4)
+            print(f"[PRESET] Saved preset to {fname}")
+        except Exception as e:
+            print(f"[PRESET] Failed to save preset: {e}")
+
+    def on_load_preset(self):
+        fname, _ = QFileDialog.getOpenFileName(
+            self, "Load Preset", os.path.expanduser('~'), "DTV Preset (*.json)"
+        )
+        if not fname: return
+        
+        try:
+            with open(fname, 'r') as f:
+                cfg = json.load(f)
+            
+            widgets = [self.std_combo, self.freq_band_combo, self.weather_combo,
+                       self.tx_power_slider, self.range_slider, self.lna_checkbox,
+                       self.prop_combo, self.theme_combo, self.res_combo, self.interlace_checkbox,
+                       self.audio_codec_combo, self.noise_slider, self.freq_slider,
+                       self.time_slider, self.fade_slider, self.fps_slider, self.jpg_slider,
+                       self.custom_crf_slider, self.custom_preset_combo,
+                       self.tx_port_input, self.rx_port_input,
+                       self.custom_enc_args_input, self.custom_dec_args_input]
+            for w in widgets: w.blockSignals(True)
+            
+            if 'std' in cfg: self.std_combo.setCurrentIndex(cfg['std'])
+            if 'band' in cfg: self.freq_band_combo.setCurrentIndex(cfg['band'])
+            if 'wx' in cfg: self.weather_combo.setCurrentIndex(cfg['wx'])
+            if 'pwr' in cfg: self.tx_power_slider.setValue(cfg['pwr'])
+            if 'dist' in cfg: self.range_slider.setValue(cfg['dist'])
+            if 'lna' in cfg: self.lna_checkbox.setChecked(cfg['lna'])
+            if 'prop' in cfg: self.prop_combo.setCurrentIndex(cfg['prop'])
+            if 'theme' in cfg: self.theme_combo.setCurrentIndex(cfg['theme'])
+            if 'res' in cfg: self.res_combo.setCurrentIndex(cfg['res'])
+            if 'il' in cfg: self.interlace_checkbox.setChecked(cfg['il'])
+            if 'acodec' in cfg:
+                self.audio_codec_combo.setCurrentIndex(cfg['acodec'])
+                self.audio_codec = ['mp2', 'ac3', 'aac'][cfg['acodec']]
+            if 'noise' in cfg: self.noise_slider.setValue(cfg['noise'])
+            if 'freq' in cfg: self.freq_slider.setValue(cfg['freq'])
+            if 'time' in cfg: self.time_slider.setValue(cfg['time'])
+            if 'fade' in cfg: self.fade_slider.setValue(cfg['fade'])
+            if 'fps' in cfg: self.fps_slider.setValue(cfg['fps'])
+            if 'bitrate_val' in cfg: self.jpg_slider.setValue(cfg['bitrate_val'])
+            if 'custom_bg' in cfg: self.custom_bg_edit.setText(cfg['custom_bg'])
+            if 'custom_border' in cfg: self.custom_border_edit.setText(cfg['custom_border'])
+            if 'custom_title' in cfg: self.custom_title_edit.setText(cfg['custom_title'])
+            if 'custom_msg' in cfg: self.custom_msg_edit.setText(cfg['custom_msg'])
+            if 'custom_crf' in cfg: self.custom_crf_slider.setValue(cfg['custom_crf'])
+            if 'custom_preset' in cfg: self.custom_preset_combo.setCurrentText(cfg['custom_preset'])
+            if 'tx_port' in cfg: self.tx_port_input.setText(cfg['tx_port'])
+            if 'rx_port' in cfg: self.rx_port_input.setText(cfg['rx_port'])
+            if 'custom_enc_args' in cfg: self.custom_enc_args_input.setText(cfg['custom_enc_args'])
+            if 'custom_dec_args' in cfg: self.custom_dec_args_input.setText(cfg['custom_dec_args'])
+            
+            for w in widgets: w.blockSignals(False)
+            
+            _, w, h, _, _ = DTV_RESOLUTIONS[self.res_combo.currentIndex()]
+            self.video_width = w
+            self.video_height = h
+            self.fps = self.fps_slider.value()
+            self.interlaced = self.interlace_checkbox.isChecked()
+            
+            val = self.jpg_slider.value()
+            self.bitrate_kbps = int(500.0 * (50.0 ** ((val - 10) / 90.0)))
+            
+            if self.gr_tb:
+                try: self.gr_tb.set_active_standard(self.std_combo.currentIndex())
+                except Exception: pass
+            
+            self.preset_combo.blockSignals(True)
+            self.preset_combo.setCurrentIndex(0)
+            self.preset_combo.blockSignals(False)
+            
+            self.on_impairment_changed()
+            self._restart_pipeline()
+            print(f"[PRESET] Loaded preset from {fname}")
+        except Exception as e:
+            print(f"[PRESET] Failed to load preset: {e}")
 
     # ─────────────────────────────────────────────────────────────
     #  LINK BUDGET / IMPAIRMENT CALCULATION
@@ -2211,7 +2684,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
     def media_loop(self):
         # TX display
         if self.video_file:
-            if self.latest_preview is not None:
+            if self.chk_enable_tx_preview.isChecked() and self.latest_preview is not None:
                 qimg = QImage(self.latest_preview, self.preview_w, self.preview_h, self.preview_w * 3, QImage.Format_RGB888)
                 pix = QPixmap.fromImage(qimg)
                 scaled_pix = pix.scaled(self.orig_screen.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -2234,14 +2707,15 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             else:
                 tx_frame = frame
 
-            qimg = QImage(frame, synth_w, 480, synth_w * 3, QImage.Format_RGB888)
-            pix = QPixmap.fromImage(qimg)
-            scaled_pix = pix.scaled(self.orig_screen.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self.orig_screen.setPixmap(scaled_pix)
+            if self.chk_enable_tx_preview.isChecked():
+                qimg = QImage(frame, synth_w, 480, synth_w * 3, QImage.Format_RGB888)
+                pix = QPixmap.fromImage(qimg)
+                scaled_pix = pix.scaled(self.orig_screen.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self.orig_screen.setPixmap(scaled_pix)
 
-            if self.fullscreen_target == 'tx' and self.fullscreen_view:
-                fs_pix = pix.scaled(self.fullscreen_view.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                self.fullscreen_view.setPixmap(fs_pix)
+                if self.fullscreen_target == 'tx' and self.fullscreen_view:
+                    fs_pix = pix.scaled(self.fullscreen_view.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    self.fullscreen_view.setPixmap(fs_pix)
 
             if self.mpeg_encoder:
                 self.mpeg_encoder.push_frame(tx_frame)
@@ -2330,19 +2804,20 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         # Use bytearray to guarantee a copy and prevent "deep fried" artifacts
         frame_data = bytearray(raw_rgb)
         
-        img = Image.frombytes('RGB', (w, h), bytes(frame_data))
-        self.last_decoded = img.copy()
-        self.current_rx_frame = img.copy()
+        if self.recording:
+            img = Image.frombytes('RGB', (w, h), bytes(frame_data))
+            self.current_rx_frame = img
 
-        qimg   = QImage(frame_data, w, h, w * 3, QImage.Format_RGB888)
-        pixmap = QPixmap.fromImage(qimg)
-        
-        scaled_pix = pixmap.scaled(self.recv_screen.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.recv_screen.setPixmap(scaled_pix)
-        
-        if self.fullscreen_target == 'rx' and self.fullscreen_view:
-            fs_pix = pixmap.scaled(self.fullscreen_view.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self.fullscreen_view.setPixmap(fs_pix)
+        if self.chk_enable_rx_preview.isChecked():
+            qimg   = QImage(frame_data, w, h, w * 3, QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(qimg)
+            
+            scaled_pix = pixmap.scaled(self.recv_screen.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.recv_screen.setPixmap(scaled_pix)
+            
+            if self.fullscreen_target == 'rx' and self.fullscreen_view:
+                fs_pix = pixmap.scaled(self.fullscreen_view.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self.fullscreen_view.setPixmap(fs_pix)
 
     def on_mpeg_audio(self, pcm: bytes):
         pass
@@ -2351,26 +2826,32 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
     #  METRICS + RX DISPLAY UPDATERS
     # ─────────────────────────────────────────────────────────────
     def update_metrics(self):
+        self.on_impairment_changed()
         lock = self._lock_pct
+        is_dark = (self.current_theme == 'dark') if hasattr(self, 'current_theme') else True
+        bg_nosig = "#1c1e22" if is_dark else "#fcf0f0"
+        bg_weak = "#1c1e22" if is_dark else "#fffbeb"
+        bg_live = "#0d1117" if is_dark else "#f6ffed"
+
         if lock == 0:
             self.banner_lbl.setText("NO SIGNAL\n[ SEARCHING FOR CHANNELS ]")
             self.banner_lbl.setStyleSheet(
-                "background:#1c1e22;border:2px solid #da3633;"
-                "border-radius:5px;padding:6px;color:#da3633;")
+                f"background:{bg_nosig};border:2px solid #da3633;"
+                f"border-radius:5px;padding:6px;color:#da3633;")
         elif lock < 40:
             garbled = ''.join(
                 random.choice('#?!*@%') if c != ' ' and random.random() < 0.4 else c
                 for c in self.channel_name)
             self.banner_lbl.setText(f"WEAK  CH {self.channel_number}\n[{garbled}]")
             self.banner_lbl.setStyleSheet(
-                "background:#1c1e22;border:2px solid #e3b341;"
-                "border-radius:5px;padding:6px;color:#e3b341;")
+                f"background:{bg_weak};border:2px solid #e3b341;"
+                f"border-radius:5px;padding:6px;color:#e3b341;")
         else:
             self.banner_lbl.setText(
                 f"LIVE  CH {self.channel_number}\n[{self.channel_name}]")
             self.banner_lbl.setStyleSheet(
-                "background:#0d1117;border:2px solid #238636;"
-                "border-radius:5px;padding:6px;color:#3fb950;")
+                f"background:{bg_live};border:2px solid #238636;"
+                f"border-radius:5px;padding:6px;color:#3fb950;")
 
         tx = self._tx_pkt_count * 2
         rx = self._rx_pkt_count * 2
@@ -2417,8 +2898,15 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         # Update playback timeline slider and stats label
         if self.video_file and getattr(self, 'video_duration', 0.0) > 0 and not getattr(self, 'playback_paused', False):
             elapsed = time.time() - getattr(self, 'play_start_time', time.time())
-            curr_pos = (getattr(self, 'play_start_offset', 0.0) + elapsed) % self.video_duration
+            curr_pos = getattr(self, 'play_start_offset', 0.0) + elapsed
             
+            if elapsed >= self.video_duration:
+                if hasattr(self, 'chk_auto_advance') and self.chk_auto_advance.isChecked() and self.playlist_widget.count() > 1:
+                    QtCore.QTimer.singleShot(0, self.on_playlist_next)
+                else:
+                    self.play_start_time += self.video_duration * (elapsed // self.video_duration)
+                    curr_pos = curr_pos % self.video_duration
+
             if hasattr(self, 'timeline_slider') and not self.timeline_slider.isSliderDown():
                 self.timeline_slider.setValue(int(curr_pos))
                 
@@ -2432,18 +2920,21 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         now  = time.time()
         
         if lock == 0:
-            self._draw_no_signal()
+            if self.chk_enable_rx_preview.isChecked():
+                self._draw_no_signal()
         else:
             is_hung = False
             if self.last_frame_recv == 0.0:
                 # Give FFmpeg at least 6 seconds to start up and analyze headers before assuming it's hung
                 if now - getattr(self, 'decoder_start_time', now) > 6.0:
-                    self._draw_no_signal()
+                    if self.chk_enable_rx_preview.isChecked():
+                        self._draw_no_signal()
                     is_hung = True
             else:
                 # Once running, if no frame in 2.5s, assume crash/hang
                 if now - self.last_frame_recv > 2.5:
-                    self._draw_no_signal()
+                    if self.chk_enable_rx_preview.isChecked():
+                        self._draw_no_signal()
                     is_hung = True
 
             # Active Watchdog: If we have a signal lock but FFmpeg is hung (heavy datamosh crash),
@@ -2496,7 +2987,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             ]):
                 draw.text((22, 98 + i*18), line, fill=(180,180,200), font=fn)
 
-        else:             # Cable — gray outage
+        elif theme == 2:  # Cable — gray outage
             img  = Image.new('RGB', (W, H), (22, 22, 24))
             draw = ImageDraw.Draw(img)
             fb   = self._get_font("DejaVuSans-Bold.ttf", 14)
@@ -2508,6 +2999,43 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             draw.text((22, 118), "Please check coaxial wall outlet and", fill=(180,180,180), font=fn)
             draw.text((22, 138), "the cable connected to the rear panel.", fill=(180,180,180), font=fn)
             draw.text((22, 180), "Support: 1-800-DTV-PLAY", fill=(80,120,200), font=fn)
+            
+        else:             # Custom Theme (index 3)
+            bg_hex = self.custom_bg_edit.text() if hasattr(self, 'custom_bg_edit') else "#0f0f12"
+            border_hex = self.custom_border_edit.text() if hasattr(self, 'custom_border_edit') else "#dc4646"
+            title_text = self.custom_title_edit.text() if hasattr(self, 'custom_title_edit') else "CUSTOM BOX  —  NO SIGNAL"
+            msg_text = self.custom_msg_edit.text() if hasattr(self, 'custom_msg_edit') else ""
+
+            def hex_to_rgb(h):
+                h = h.lstrip('#')
+                try: return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+                except Exception: return (0, 0, 0)
+
+            bg_color = hex_to_rgb(bg_hex)
+            border_color = hex_to_rgb(border_hex)
+
+            img  = Image.new('RGB', (W, H), bg_color)
+            draw = ImageDraw.Draw(img)
+            fb   = self._get_font("DejaVuSans-Bold.ttf", 30)
+            fn   = self._get_font("DejaVuSans.ttf", 22)
+            draw.text((44, 56), title_text, fill=border_color, font=fb)
+            draw.line([44, 100, W-44, 100], fill=border_color, width=4)
+            
+            words = msg_text.split(' ')
+            lines = []
+            cur_line = ""
+            for word in words:
+                test_line = cur_line + (" " if cur_line else "") + word
+                if len(test_line) * 14 > W - 88:
+                    lines.append(cur_line)
+                    cur_line = word
+                else:
+                    cur_line = test_line
+            if cur_line:
+                lines.append(cur_line)
+
+            for i, line in enumerate(lines[:8]):
+                draw.text((44, 130 + i*40), line, fill=(255, 255, 255), font=fn)
 
         self.current_rx_frame = img.copy()
         qimg = QImage(img.tobytes('raw','RGB'), W, H, W * 3, QImage.Format_RGB888)
@@ -2595,6 +3123,8 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             self, "Save RX Recording", os.path.join(USER_HOME, "rx_recording.mp4"),
             "MP4 Video (*.mp4)")
         if not fname: return
+        if not fname.lower().endswith('.mp4'):
+            fname += '.mp4'
 
         # Determine target resolution on GUI thread
         idx = self.rec_res_combo.currentIndex()
@@ -2635,45 +3165,54 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
                        '-vn', '-i', rec_path, '-map', '0:v:0', '-map', '1:a:0?',
                        '-vf', f'setpts=PTS-STARTPTS,scale={target_w}:{target_h}:flags=lanczos',
                        '-af', 'asetpts=PTS-STARTPTS',
-                       '-c:v', 'libx264', '-crf', '22', '-preset', 'fast',
+                       '-c:v', 'libx264', '-crf', '22', '-preset', 'superfast',
                        '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', fname]
             else:
                 cmd = ['ffmpeg', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
                        '-framerate', f'{actual_fps:.4f}', '-s', '960x540', '-i', '-',
                        '-map', '0:v:0',
                        '-vf', f'setpts=PTS-STARTPTS,scale={target_w}:{target_h}:flags=lanczos',
-                       '-c:v', 'libx264', '-crf', '22', '-preset', 'fast',
+                       '-c:v', 'libx264', '-crf', '22', '-preset', 'superfast',
                        '-pix_fmt', 'yuv420p', fname]
             try:
-                proc = subprocess.Popen(
-                    cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                
-                # Write all frames to stdin
-                for img in self.recording_frames:
-                    if proc.poll() is not None:
-                        break
+                err_log_path = os.path.join(APP_DATA_DIR, 'transcode_stderr.log')
+                with open(err_log_path, 'w') as err_log:
+                    proc = subprocess.Popen(
+                        cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=err_log)
+                    
+                    # Write all frames to stdin
+                    for img in self.recording_frames:
+                        if proc.poll() is not None:
+                            break
+                        try:
+                            proc.stdin.write(img.tobytes())
+                        except Exception:
+                            break
                     try:
-                        proc.stdin.write(img.tobytes())
+                        proc.stdin.close()
                     except Exception:
-                        break
-                try:
-                    proc.stdin.close()
-                except Exception:
-                    pass
+                        pass
+                    
+                    proc.wait(timeout=120)
                 
-                proc.wait(timeout=60)
                 if proc.returncode == 0:
                     QtCore.QMetaObject.invokeMethod(self.rec_lbl, "setText",
                         QtCore.Qt.QueuedConnection, QtCore.Q_ARG(str, f"Saved: {os.path.basename(fname)}"))
                 else:
-                    err = proc.stderr.read().decode()
+                    err_content = ""
+                    try:
+                        if os.path.exists(err_log_path):
+                            with open(err_log_path, 'r') as f:
+                                err_content = f.read()
+                    except Exception:
+                        pass
                     QtCore.QMetaObject.invokeMethod(self.rec_lbl, "setText",
                         QtCore.Qt.QueuedConnection, QtCore.Q_ARG(str, f"Save failed: transcode error"))
-                    print(f"[REC-SAVE] FFmpeg failed:\n{err}")
+                    print(f"[REC-SAVE] FFmpeg failed. Code: {proc.returncode}. Log:\n{err_content}")
             except Exception as e:
                 QtCore.QMetaObject.invokeMethod(self.rec_lbl, "setText",
                     QtCore.Qt.QueuedConnection, QtCore.Q_ARG(str, f"Save failed: {e}"))
-                    
+
         threading.Thread(target=transcode_worker, daemon=True).start()
 
     # ─────────────────────────────────────────────────────────────
@@ -2693,19 +3232,22 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             try: t.stop()
             except Exception: pass
 
-        if self.preview_thread:
-            try: self.preview_thread.stop()
-            except Exception: pass
+        self._safe_stop_thread('preview_thread')
         if self.preview_proc:
-            try: self.preview_proc.terminate()
+            try:
+                if self.preview_proc.stdin: self.preview_proc.stdin.close()
             except Exception: pass
+            try:
+                if self.preview_proc.stdout: self.preview_proc.stdout.close()
+            except Exception: pass
+            try:
+                self.preview_proc.terminate()
+                self.preview_proc.wait(timeout=0.2)
+            except Exception: pass
+            self.preview_proc = None
 
-        if self.mpeg_encoder:
-            try: self.mpeg_encoder.stop()
-            except Exception: pass
-        if self.mpeg_decoder:
-            try: self.mpeg_decoder.stop()
-            except Exception: pass
+        self._safe_stop_thread('mpeg_encoder')
+        self._safe_stop_thread('mpeg_decoder')
         if self.channel_relay:
             try: self.channel_relay.stop()
             except Exception: pass
@@ -2713,7 +3255,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             try: self.aplay_proc.terminate()
             except Exception: pass
         if self.gr_tb:
-            try: self.gr_tb.stop()
+            try: self.gr_tb.stop(); self.gr_tb.wait()
             except Exception: pass
 
         event.accept()
