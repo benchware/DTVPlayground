@@ -968,6 +968,7 @@ class DtvPlaygroundApp(QMainWindow):
 
         # ── Build UI ──────────────────────────────────────────
         self.init_ui()
+        self.on_service_type_changed()
         self.on_impairment_changed()
 
         # ── Channel Relay ─────────────────────────────────────
@@ -1448,11 +1449,20 @@ class DtvPlaygroundApp(QMainWindow):
 
         pb.setLayout(pv); v.addWidget(pb)
 
+        # Service Type
+        st_box = QGroupBox("DTV Service / Transmission"); stv = QVBoxLayout()
+        self.service_type_combo = QComboBox()
+        self.service_type_combo.addItems([
+            "Antenna TV (Over-the-Air)",
+            "Cable TV (Coaxial)",
+            "Satellite TV"
+        ])
+        self.service_type_combo.currentIndexChanged.connect(self.on_service_type_changed)
+        stv.addWidget(self.service_type_combo); st_box.setLayout(stv); v.addWidget(st_box)
+
         # Standard
         sb_box = QGroupBox("DTV Standard / Modulation"); sv = QVBoxLayout()
         self.std_combo = QComboBox()
-        self.std_combo.addItems(["ATSC (8VSB)", "DVB-S2 (8PSK)",
-                                  "J.83B (64QAM)", "DVB-T2 (256QAM)", "DVB-T (OFDM)"])
         self.std_combo.currentIndexChanged.connect(self.on_standard_changed)
         sv.addWidget(self.std_combo); sb_box.setLayout(sv); v.addWidget(sb_box)
 
@@ -1460,18 +1470,6 @@ class DtvPlaygroundApp(QMainWindow):
         rf = QGroupBox("RF Link & Weather"); rfv = QVBoxLayout(); rfv.setSpacing(3)
         rfv.addWidget(QLabel("Frequency Band"))
         self.freq_band_combo = QComboBox()
-        self.freq_band_combo.addItems([
-            "VHF (174 MHz)",
-            "B-Band (450 MHz)",
-            "UHF (600 MHz)",
-            "L-Band (1.5 GHz)",
-            "S-Band (2.5 GHz)",
-            "C-Band (4.0 GHz)",
-            "X-Band (10.0 GHz)",
-            "Ku-Band (12.0 GHz)",
-            "K-Band (20.0 GHz)",
-            "Ka-Band (30.0 GHz)"
-        ])
         self.freq_band_combo.currentIndexChanged.connect(self.on_impairment_changed)
         rfv.addWidget(self.freq_band_combo)
 
@@ -1930,9 +1928,128 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         self.channel_name   = self.name_input.text()
         self.channel_number = self.num_input.text()
 
+    def on_service_type_changed(self):
+        service_idx = self.service_type_combo.currentIndex()
+        
+        # Block signals to prevent intermediate callback loops
+        self.std_combo.blockSignals(True)
+        self.freq_band_combo.blockSignals(True)
+        
+        self.std_combo.clear()
+        self.freq_band_combo.clear()
+        
+        if service_idx == 0:  # Antenna TV
+            self.std_combo.addItems([
+                "ATSC (8VSB)",
+                "DVB-T (OFDM)",
+                "DVB-T2 (256QAM)"
+            ])
+            self.freq_band_combo.addItems([
+                "VHF (174 MHz)",
+                "UHF (600 MHz)"
+            ])
+        elif service_idx == 1:  # Cable TV
+            self.std_combo.addItems([
+                "J.83B (64QAM)",
+                "J.83B (256QAM)"
+            ])
+            self.freq_band_combo.addItems([
+                "Sub-split (30 MHz)",
+                "Mid-band (150 MHz)",
+                "Super-band (300 MHz)",
+                "Hyper-band (450 MHz)",
+                "Ultra-band (600 MHz)",
+                "Extended-band (850 MHz)",
+                "Gigabit-band (1000 MHz)"
+            ])
+        elif service_idx == 2:  # Satellite TV
+            self.std_combo.addItems([
+                "DVB-S (QPSK)",
+                "DVB-S2 (8PSK)"
+            ])
+            self.freq_band_combo.addItems([
+                "L-Band (1.5 GHz)",
+                "S-Band (2.5 GHz)",
+                "C-Band (4.0 GHz)",
+                "X-Band (10.0 GHz)",
+                "Ku-Band (12.0 GHz)",
+                "K-Band (20.0 GHz)",
+                "Ka-Band (30.0 GHz)"
+            ])
+            
+        self.std_combo.blockSignals(False)
+        self.freq_band_combo.blockSignals(False)
+        
+        # Trigger updates
+        if self.gr_tb:
+            try:
+                std_id, _, _ = self.get_active_standard_id_and_details()
+                self.gr_tb.set_active_standard(std_id)
+            except Exception: pass
+            
+        self.on_impairment_changed()
+
+    def get_active_standard_id_and_details(self):
+        std_text = self.std_combo.currentText()
+        if "ATSC" in std_text:
+            return 0, 6, 15
+        elif "DVB-S2" in std_text:
+            return 1, 8, 10
+        elif "DVB-S" in std_text:
+            return 1, 8, 8
+        elif "J.83B (64QAM)" in std_text:
+            return 2, 8, 22
+        elif "J.83B (256QAM)" in std_text:
+            return 2, 8, 28
+        elif "DVB-T2" in std_text:
+            return 3, 8, 16
+        elif "DVB-T (OFDM)" in std_text:
+            return 4, 8, 5
+        return 0, 6, 15
+
+    def get_active_band_details(self):
+        band_text = self.freq_band_combo.currentText()
+        if "VHF" in band_text:
+            return 174.0, 3.0, 0
+        elif "B-Band" in band_text:
+            return 450.0, 4.5, 1
+        elif "UHF" in band_text:
+            return 600.0, 6.0, 2
+        elif "Sub-split" in band_text:
+            return 30.0, 1.0, 0
+        elif "Mid-band" in band_text:
+            return 150.0, 2.5, 0
+        elif "Super-band" in band_text:
+            return 300.0, 4.0, 1
+        elif "Hyper-band" in band_text:
+            return 450.0, 5.0, 1
+        elif "Ultra-band" in band_text:
+            return 600.0, 6.0, 2
+        elif "Extended-band" in band_text:
+            return 850.0, 7.0, 2
+        elif "Gigabit-band" in band_text:
+            return 1000.0, 8.0, 2
+        elif "L-Band" in band_text:
+            return 1500.0, 12.0, 3
+        elif "S-Band" in band_text:
+            return 2500.0, 18.0, 4
+        elif "C-Band" in band_text:
+            return 4000.0, 24.0, 5
+        elif "X-Band" in band_text:
+            return 10000.0, 30.0, 6
+        elif "Ku-Band" in band_text:
+            return 12000.0, 36.0, 7
+        elif "K-Band" in band_text:
+            return 20000.0, 39.0, 8
+        elif "Ka-Band" in band_text:
+            return 30000.0, 42.0, 9
+        return 600.0, 6.0, 2
+
     def on_standard_changed(self, idx):
         if self.gr_tb:
-            try: self.gr_tb.set_active_standard(idx)
+            try:
+                std_id, _, _ = self.get_active_standard_id_and_details()
+                self.gr_tb.set_active_standard(std_id)
             except Exception: pass
         self.on_impairment_changed()
 
@@ -2374,7 +2491,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
 
     def on_preset_changed(self, idx):
         if idx == 0: return
-        widgets = [self.std_combo, self.freq_band_combo, self.weather_combo,
+        widgets = [self.service_type_combo, self.std_combo, self.freq_band_combo, self.weather_combo,
                    self.tx_power_slider, self.range_slider, self.lna_checkbox,
                    self.prop_combo, self.theme_combo, self.res_combo, self.interlace_checkbox,
                    self.audio_codec_combo, self.noise_slider, self.freq_slider,
@@ -2385,10 +2502,17 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         for w in widgets: w.blockSignals(True)
 
         cfg = {
-            1: dict(std=0, band=2, wx=0, pwr=40, dist=10,  lna=True,  prop=0, theme=0, res=0, il=True,  acodec=1, noise=0, freq=0, time=1000, fade=0),
+            1: dict(service_type=0, std=0, band=1, wx=0, pwr=40, dist=10,  lna=True,  prop=0, theme=0, res=0, il=True,  acodec=1, noise=0, freq=0, time=1000, fade=0),
         }.get(idx, {})
 
         if cfg:
+            if 'service_type' in cfg:
+                self.service_type_combo.setCurrentIndex(cfg['service_type'])
+                self.service_type_combo.blockSignals(False)
+                self.on_service_type_changed()
+                self.service_type_combo.blockSignals(True)
+                self.std_combo.blockSignals(True)
+                self.freq_band_combo.blockSignals(True)
             self.std_combo.setCurrentIndex(cfg['std'])
             self.freq_band_combo.setCurrentIndex(cfg['band'])
             self.weather_combo.setCurrentIndex(cfg['wx'])
@@ -2439,6 +2563,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             fname += '.json'
         
         cfg = {
+            'service_type': self.service_type_combo.currentIndex(),
             'std': self.std_combo.currentIndex(),
             'band': self.freq_band_combo.currentIndex(),
             'wx': self.weather_combo.currentIndex(),
@@ -2485,7 +2610,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             with open(fname, 'r') as f:
                 cfg = json.load(f)
             
-            widgets = [self.std_combo, self.freq_band_combo, self.weather_combo,
+            widgets = [self.service_type_combo, self.std_combo, self.freq_band_combo, self.weather_combo,
                        self.tx_power_slider, self.range_slider, self.lna_checkbox,
                        self.prop_combo, self.theme_combo, self.res_combo, self.interlace_checkbox,
                        self.audio_codec_combo, self.noise_slider, self.freq_slider,
@@ -2494,6 +2619,14 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
                        self.tx_port_input, self.rx_port_input,
                        self.custom_enc_args_input, self.custom_dec_args_input]
             for w in widgets: w.blockSignals(True)
+            
+            if 'service_type' in cfg:
+                self.service_type_combo.setCurrentIndex(cfg['service_type'])
+                self.service_type_combo.blockSignals(False)
+                self.on_service_type_changed()
+                self.service_type_combo.blockSignals(True)
+                self.std_combo.blockSignals(True)
+                self.freq_band_combo.blockSignals(True)
             
             if 'std' in cfg: self.std_combo.setCurrentIndex(cfg['std'])
             if 'band' in cfg: self.freq_band_combo.setCurrentIndex(cfg['band'])
@@ -2555,8 +2688,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
     # ─────────────────────────────────────────────────────────────
     def on_impairment_changed(self):
         dist   = self.range_slider.value()
-        fi     = self.freq_band_combo.currentIndex()
-        freq   = [174.0, 450.0, 600.0, 1500.0, 2500.0, 4000.0, 10000.0, 12000.0, 20000.0, 30000.0][min(fi, 9)]
+        freq, ant_gain, atten_idx = self.get_active_band_details()
         wi     = self.weather_combo.currentIndex()
         atten  = [
             [0,     0,     0,     0,     0,     0,     0,     0,     0,     0    ],
@@ -2564,7 +2696,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             [0.002, 0.006, 0.01,  0.05,  0.10,  0.20,  0.35,  0.5,   0.85,  1.2  ],
             [0.005, 0.015, 0.03,  0.12,  0.25,  0.50,  2.00,  3.5,   5.80,  8.0  ],
             [0.01,  0.05,  0.10,  0.35,  0.70,  1.50,  5.00,  8.0,   14.00, 20.0 ],
-        ][wi][min(fi, 9)]
+        ][wi][min(atten_idx, 9)]
 
         std_idx  = self.std_combo.currentIndex()
         medium_loss = 0.0
@@ -2597,14 +2729,13 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         else:
             self.prop_desc_lbl.setText("Line-of-Sight: standard free-space path loss.")
 
-        # Band-dependent antenna gains (VHF: 3, B: 4.5, UHF: 6, L: 12, S: 18, C: 24, X: 30, Ku: 36, K: 39, Ka: 42 dBi)
+        # Band-dependent antenna gains
         # Represents realistic home TV antennas & high-gain satellite dishes
-        ant_gain = [3.0, 4.5, 6.0, 12.0, 18.0, 24.0, 30.0, 36.0, 39.0, 42.0][min(fi, 9)]
         rx_gain = ant_gain + (12.0 if self.lna_checkbox.isChecked() else 0.0)
         rx_pwr  = tx_dbm - tloss + rx_gain + pgain
 
         # Realistic noise floor: thermal + NF at standard bandwidth
-        bw_mhz = [6, 8, 8, 8, 8][self.std_combo.currentIndex()]
+        _, bw_mhz, thresh = self.get_active_standard_id_and_details()
         n_floor = -174.0 + 10*math.log10(bw_mhz * 1e6) + 7.0   # 7 dB NF
 
         ni = self.noise_slider.value()
@@ -2621,8 +2752,6 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         snr -= abs(fo)*150 + abs(tv-1)*1000 + mv*15
         self._effective_snr = snr
 
-        std_idx  = self.std_combo.currentIndex()
-        thresh   = [15, 10, 22, 16, 5][std_idx]
         margin   = snr - thresh
         if margin < 0:
             lock = 0
