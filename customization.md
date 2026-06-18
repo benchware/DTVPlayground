@@ -1,0 +1,61 @@
+# DTV Playground Customization Manual
+
+This document provides details on customizing the transmitter, receiver, channel impairment DSP settings, custom themes, preset saving/loading, and FFmpeg pipelines.
+
+## 1. Receiver Box and Outage Theme Customization
+When the receiver loses lock on a signal or suffers from high packet drop rates, the receiver screen displays a themed outage card. This card is fully customizable from the theme settings interface.
+
+### Standard and Custom Themes
+Users can select from several pre-configured themes or design their own using raw hexadecimal values:
+* Dark Sleek (Default): Deep dark background with high-contrast borders.
+* Blue Cyber: Neon blue borders and dark background for a futuristic aesthetic.
+* Retro Amber: Warm amber color scheme reminiscent of vintage monochrome CRT monitors.
+* Green Matrix: Classic terminal green colors.
+* Light Theme: A bright white and light gray theme for day-time readability.
+* Custom: Allows direct editing of the background and border/text color fields using hex codes (e.g. #FF5555 for bright red).
+
+### Background Patterns
+Instead of a solid background color, users can select a custom background pattern:
+* Solid Color: Uses the selected theme background color.
+* SMPTE Color Bars: Standard NTSC television test card pattern.
+* Color Bars: Rainbow vertical color bars.
+* Grid Pattern: Alignment grid lines on a black background.
+* White Noise: Randomized grain pattern simulating static noise.
+* Custom Image: Load any external image (JPEG or PNG) from your system as the background card. A file browser button is provided to easily locate and select images.
+
+### Typography and Font Settings
+* Font Family: Enter the name of any installed TrueType (.ttf) or OpenType (.otf) font family (e.g. DejaVuSans, Arial, LiberationSans). The system automatically falls back to default system fonts if the specified font is missing.
+* Font Size: Enter a custom font size (in pixels) for the text overlay. The title text scales proportionally to the font size.
+
+## 2. RF Impairments and DSP Channel Settings
+The simulation model features a physical-layer digital signal processor (DSP) channel simulator. Adjusting these parameters lets you test the resilience of the receiver.
+
+### LNA Gain Control
+* Low Noise Amplifier (LNA) Gain: Selectable from +5 dB to +30 dB. Increasing the LNA gain boosts weak signals before they hit the demodulator.
+
+### Noise Floor Offset
+* Noise Floor Offset: Adjustable from -30 dB to +30 dB. Allows raising or lowering the baseline thermal noise floor to test the receiver threshold.
+
+### Signal Loss and Impairments
+* Range Slider: Simulates path loss from transmitter distance.
+* Noise Slider: Introduces additive white Gaussian noise (AWGN) to simulate atmospheric noise.
+* Multipath Fading: Selectable propagation profiles (Line of Sight, Rician Fading, Rayleigh Fading) to simulate reflections and Doppler shift.
+* Weather Conditions: Adjusts attenuation due to rain or atmospheric humidity.
+
+## 3. Custom FFmpeg Arguments and Port Routing
+For power users, the underlying FFmpeg encoding and decoding pipelines are fully configurable.
+
+### Custom Pipelines
+* TX Custom Encoder Arguments: Add custom FFmpeg arguments to the transmitter process. Useful for tweaking quantizer parameters, GOP sizes, thread count, or encoder profiles.
+* RX Custom Decoder Arguments: Add custom arguments to the FFmpeg receiver process. Useful for forcing specific demuxers, setting thread counts, or configuring error concealment strategies.
+
+### Custom UDP Ports
+* TX Port: Customize the target port for outgoing UDP broadcast streams.
+* RX Port: Customize the listening port for incoming UDP streams.
+
+## 4. Preset Management
+All user configurations, including theme settings, font selections, custom image paths, DSP options, and custom FFmpeg arguments can be saved and restored.
+
+* Save Preset: Export all settings to a JSON format configuration file.
+* Load Preset: Import settings from a saved JSON file to instantly configure the playground.
+* Quick Presets: Select from standard pre-configured broadcasting profiles.

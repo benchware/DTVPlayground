@@ -12,7 +12,9 @@ RX:  corrupted TS datagrams  →  ffmpeg MPEG-2 decoder  →  authentic error co
 Hardware: QSV → VAAPI → software fallback (auto-detected at launch)
 Audio:    MP2 inside MPEG-TS stream, decoded by ffmpeg → aplay 48kHz stereo
 """
-import sys, os, time, socket, threading, subprocess, io, math, random, queue, signal, json
+import sys, os
+os.environ["QT_LOGGING_RULES"] = "qt.qpa.wayland.warning=false;qt.qpa.wayland=false"
+import time, socket, threading, subprocess, io, math, random, queue, signal, json
 import numpy as np
 from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtWidgets import (
@@ -530,8 +532,8 @@ class MpegTsDecoderThread(QThread):
                '-fflags', 'nobuffer',
                '-err_detect', 'ignore_err',
                '-ec', 'deblock+favor_inter',
-               '-analyzeduration', '2000000',
-               '-probesize', '2000000',
+               '-analyzeduration', '1000000',
+               '-probesize', '250000',
                '-f', 'mpegts', '-i', 'pipe:0']
             + custom_args_list
             + ['-map', '0:v?',
@@ -554,8 +556,8 @@ class MpegTsDecoderThread(QThread):
              '-max_error_rate', '1.0',
              '-fflags', 'nobuffer',
              '-err_detect', 'ignore_err',
-             '-analyzeduration', '2000000',
-             '-probesize', '2000000',
+             '-analyzeduration', '1000000',
+             '-probesize', '250000',
              '-f', 'mpegts', '-i', 'pipe:0']
             + custom_args_list
             + ['-map', '0:a?',
@@ -615,6 +617,13 @@ class MpegTsDecoderThread(QThread):
             current = getattr(self, proc_name)
             if old_proc is not None and current is not old_proc:
                 return
+                
+            # Reset the watchdog times on the parent main window so it doesn't immediately force recovery again!
+            if hasattr(self, 'parent_win') and self.parent_win:
+                self.parent_win.last_recovery_time = time.time()
+                self.parent_win.decoder_start_time = time.time()
+                self.parent_win.last_frame_recv = 0.0
+
             if current:
                 try:
                     if current.stdin:
@@ -630,9 +639,17 @@ class MpegTsDecoderThread(QThread):
                     try: current.err_log.close()
                     except Exception: pass
             if proc_name == 'video_proc':
+                # Clear queue to prevent reading corrupted backlog packets
+                while not self.vq.empty():
+                    try: self.vq.get_nowait()
+                    except queue.Empty: break
                 if self._start_video():
                     threading.Thread(target=self._read_video, daemon=True).start()
             else:
+                # Clear queue to prevent reading corrupted backlog packets
+                while not self.aq.empty():
+                    try: self.aq.get_nowait()
+                    except queue.Empty: break
                 if self._start_audio():
                     threading.Thread(target=self._read_audio, daemon=True).start()
 
@@ -1060,6 +1077,7 @@ class DtvPlaygroundApp(QMainWindow):
             fps=self.fps, deinterlace=self.deinterlace_rx,
             port=rx_port, custom_dec_args=custom_dec_args
         )
+        self.mpeg_decoder.parent_win = self
         is_unmuted = self.btn_mute_rx.isChecked() if hasattr(self, 'btn_mute_rx') else True
         self.mpeg_decoder.vol_level = (self.vol_slider.value() if is_unmuted else 0) / 100.0
         self.mpeg_decoder.lock_level = self._lock_pct
@@ -1190,6 +1208,20 @@ class DtvPlaygroundApp(QMainWindow):
         color = QColorDialog.getColor(QtGui.QColor(self.custom_border_edit.text()), self)
         if color.isValid():
             self.custom_border_edit.setText(color.name())
+
+    def pick_custom_image(self):
+        fname, _ = QFileDialog.getOpenFileName(
+            self, "Select Custom Outage Image", USER_HOME,
+            "Images (*.png *.jpg *.jpeg *.bmp *.gif)"
+        )
+        if fname:
+            self.custom_image_edit.setText(fname)
+            self.on_custom_theme_changed()
+
+    def on_pattern_changed(self, idx):
+        is_custom_img = (idx == 5)
+        if hasattr(self, 'custom_image_widget'):
+            self.custom_image_widget.setVisible(is_custom_img)
 
     def on_custom_theme_changed(self, *args):
         if self._lock_pct == 0:
@@ -1495,11 +1527,25 @@ class DtvPlaygroundApp(QMainWindow):
         rfv.addWidget(self.range_slider); rfv.addWidget(self.range_lbl)
 
         ex = QHBoxLayout()
-        self.lna_checkbox = QCheckBox("LNA (+12 dB)")
+        self.lna_checkbox = QCheckBox("LNA Gain")
         self.lna_checkbox.toggled.connect(self.on_impairment_changed)
         self.adv_checkbox = QCheckBox("Advanced DSP")
         ex.addWidget(self.lna_checkbox); ex.addWidget(self.adv_checkbox)
         rfv.addLayout(ex)
+
+        rfv.addWidget(QLabel("Custom LNA Gain"))
+        self.lna_gain_slider = QSlider(Qt.Horizontal)
+        self.lna_gain_slider.setRange(5, 30); self.lna_gain_slider.setValue(12)
+        self.lna_gain_slider.valueChanged.connect(self.on_impairment_changed)
+        self.lna_gain_lbl = QLabel("12 dB")
+        rfv.addWidget(self.lna_gain_slider); rfv.addWidget(self.lna_gain_lbl)
+
+        rfv.addWidget(QLabel("Custom Noise Floor Offset"))
+        self.noise_offset_slider = QSlider(Qt.Horizontal)
+        self.noise_offset_slider.setRange(-30, 30); self.noise_offset_slider.setValue(0)
+        self.noise_offset_slider.valueChanged.connect(self.on_impairment_changed)
+        self.noise_offset_lbl = QLabel("0 dB")
+        rfv.addWidget(self.noise_offset_slider); rfv.addWidget(self.noise_offset_lbl)
 
         self.adv_box = QGroupBox("Advanced DSP Impairments")
         av = QVBoxLayout(); av.setSpacing(2)
@@ -1580,6 +1626,33 @@ class DtvPlaygroundApp(QMainWindow):
         custom_layout.setContentsMargins(0, 4, 0, 0)
         custom_layout.setSpacing(4)
 
+        # Pattern choice
+        self.custom_pattern_combo = QComboBox()
+        self.custom_pattern_combo.addItems([
+            "Solid Background Color",
+            "SMPTE Color Bars",
+            "Color Bars (Rainbow)",
+            "Grid / Crosshatch",
+            "White Noise (Animated)",
+            "Custom Image File"
+        ])
+        self.custom_pattern_combo.currentIndexChanged.connect(self.on_pattern_changed)
+        self.custom_pattern_combo.currentIndexChanged.connect(self.on_custom_theme_changed)
+        custom_layout.addRow("Test Card / Pattern:", self.custom_pattern_combo)
+
+        # Custom image row widget (hidden by default)
+        self.custom_image_widget = QWidget()
+        ci_lay = QHBoxLayout(); ci_lay.setContentsMargins(0, 0, 0, 0)
+        self.custom_image_edit = QLineEdit()
+        self.custom_image_edit.textChanged.connect(self.on_custom_theme_changed)
+        btn_pick_img = QPushButton("Browse")
+        btn_pick_img.clicked.connect(self.pick_custom_image)
+        ci_lay.addWidget(self.custom_image_edit)
+        ci_lay.addWidget(btn_pick_img)
+        self.custom_image_widget.setLayout(ci_lay)
+        self.custom_image_widget.setVisible(False)
+        custom_layout.addRow("Image File:", self.custom_image_widget)
+
         # Bg color row
         self.custom_bg_edit = QLineEdit("#0f0f12")
         self.custom_bg_edit.textChanged.connect(self.on_custom_theme_changed)
@@ -1590,7 +1663,7 @@ class DtvPlaygroundApp(QMainWindow):
         bg_row.addWidget(btn_bg_color)
         custom_layout.addRow("Background Color:", bg_row)
 
-        # Border color row
+        # Border color/Accent row
         self.custom_border_edit = QLineEdit("#dc4646")
         self.custom_border_edit.textChanged.connect(self.on_custom_theme_changed)
         btn_border_color = QPushButton("Pick")
@@ -1598,7 +1671,16 @@ class DtvPlaygroundApp(QMainWindow):
         border_row = QHBoxLayout()
         border_row.addWidget(self.custom_border_edit)
         border_row.addWidget(btn_border_color)
-        custom_layout.addRow("Border Color:", border_row)
+        custom_layout.addRow("Border/Accent Color:", border_row)
+
+        # Font family and size
+        self.custom_font_family_edit = QLineEdit("DejaVuSans")
+        self.custom_font_family_edit.textChanged.connect(self.on_custom_theme_changed)
+        custom_layout.addRow("Font Family/Path:", self.custom_font_family_edit)
+
+        self.custom_font_size_edit = QLineEdit("22")
+        self.custom_font_size_edit.textChanged.connect(self.on_custom_theme_changed)
+        custom_layout.addRow("Font Size (px):", self.custom_font_size_edit)
 
         # Title
         self.custom_title_edit = QLineEdit("CUSTOM BOX  —  NO SIGNAL")
@@ -2498,11 +2580,12 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
                    self.time_slider, self.fade_slider, self.fps_slider, self.jpg_slider,
                    self.custom_crf_slider, self.custom_preset_combo,
                    self.tx_port_input, self.rx_port_input,
-                   self.custom_enc_args_input, self.custom_dec_args_input]
+                   self.custom_enc_args_input, self.custom_dec_args_input,
+                   self.noise_offset_slider, self.lna_gain_slider, self.custom_pattern_combo]
         for w in widgets: w.blockSignals(True)
 
         cfg = {
-            1: dict(service_type=0, std=0, band=1, wx=0, pwr=40, dist=10,  lna=True,  prop=0, theme=0, res=0, il=True,  acodec=1, noise=0, freq=0, time=1000, fade=0),
+            1: dict(service_type=0, std=0, band=1, wx=0, pwr=40, dist=10,  lna=True,  prop=0, theme=0, res=0, il=True,  acodec=1, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
         }.get(idx, {})
 
         if cfg:
@@ -2526,6 +2609,9 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             self.audio_codec_combo.setCurrentIndex(cfg['acodec'])
             self.audio_codec = ['mp2', 'ac3', 'aac'][cfg['acodec']]
             self.noise_slider.setValue(cfg.get('noise', 0))
+            if 'noise_offset' in cfg: self.noise_offset_slider.setValue(cfg['noise_offset'])
+            if 'lna_gain' in cfg: self.lna_gain_slider.setValue(cfg['lna_gain'])
+            if 'custom_pattern' in cfg: self.custom_pattern_combo.setCurrentIndex(cfg['custom_pattern'])
             self.freq_slider.setValue(cfg.get('freq', 0))
             self.time_slider.setValue(cfg.get('time', 1000))
             self.fade_slider.setValue(cfg.get('fade', 0))
@@ -2590,7 +2676,13 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             'tx_port': self.tx_port_input.text(),
             'rx_port': self.rx_port_input.text(),
             'custom_enc_args': self.custom_enc_args_input.text(),
-            'custom_dec_args': self.custom_dec_args_input.text()
+            'custom_dec_args': self.custom_dec_args_input.text(),
+            'noise_offset': self.noise_offset_slider.value(),
+            'lna_gain': self.lna_gain_slider.value(),
+            'custom_pattern': self.custom_pattern_combo.currentIndex(),
+            'custom_image': self.custom_image_edit.text(),
+            'custom_font_family': self.custom_font_family_edit.text(),
+            'custom_font_size': self.custom_font_size_edit.text()
         }
         
         try:
@@ -2617,7 +2709,8 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
                        self.time_slider, self.fade_slider, self.fps_slider, self.jpg_slider,
                        self.custom_crf_slider, self.custom_preset_combo,
                        self.tx_port_input, self.rx_port_input,
-                       self.custom_enc_args_input, self.custom_dec_args_input]
+                       self.custom_enc_args_input, self.custom_dec_args_input,
+                       self.noise_offset_slider, self.lna_gain_slider, self.custom_pattern_combo]
             for w in widgets: w.blockSignals(True)
             
             if 'service_type' in cfg:
@@ -2656,6 +2749,12 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             if 'tx_port' in cfg: self.tx_port_input.setText(cfg['tx_port'])
             if 'rx_port' in cfg: self.rx_port_input.setText(cfg['rx_port'])
             if 'custom_enc_args' in cfg: self.custom_enc_args_input.setText(cfg['custom_enc_args'])
+            if 'noise_offset' in cfg: self.noise_offset_slider.setValue(cfg['noise_offset'])
+            if 'lna_gain' in cfg: self.lna_gain_slider.setValue(cfg['lna_gain'])
+            if 'custom_pattern' in cfg: self.custom_pattern_combo.setCurrentIndex(cfg['custom_pattern'])
+            if 'custom_image' in cfg: self.custom_image_edit.setText(cfg['custom_image'])
+            if 'custom_font_family' in cfg: self.custom_font_family_edit.setText(cfg['custom_font_family'])
+            if 'custom_font_size' in cfg: self.custom_font_size_edit.setText(cfg['custom_font_size'])
             if 'custom_dec_args' in cfg: self.custom_dec_args_input.setText(cfg['custom_dec_args'])
             
             for w in widgets: w.blockSignals(False)
@@ -2687,6 +2786,12 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
     #  LINK BUDGET / IMPAIRMENT CALCULATION
     # ─────────────────────────────────────────────────────────────
     def on_impairment_changed(self):
+        # Update text labels
+        if hasattr(self, 'noise_offset_lbl'):
+            self.noise_offset_lbl.setText(f"{self.noise_offset_slider.value():+d} dB")
+        if hasattr(self, 'lna_gain_lbl'):
+            self.lna_gain_lbl.setText(f"{self.lna_gain_slider.value()} dB")
+
         dist   = self.range_slider.value()
         freq, ant_gain, atten_idx = self.get_active_band_details()
         wi     = self.weather_combo.currentIndex()
@@ -2731,12 +2836,14 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
 
         # Band-dependent antenna gains
         # Represents realistic home TV antennas & high-gain satellite dishes
-        rx_gain = ant_gain + (12.0 if self.lna_checkbox.isChecked() else 0.0)
+        lna_val = self.lna_gain_slider.value() if hasattr(self, 'lna_gain_slider') else 12.0
+        rx_gain = ant_gain + (lna_val if self.lna_checkbox.isChecked() else 0.0)
         rx_pwr  = tx_dbm - tloss + rx_gain + pgain
 
         # Realistic noise floor: thermal + NF at standard bandwidth
         _, bw_mhz, thresh = self.get_active_standard_id_and_details()
-        n_floor = -174.0 + 10*math.log10(bw_mhz * 1e6) + 7.0   # 7 dB NF
+        noise_offset = self.noise_offset_slider.value() if hasattr(self, 'noise_offset_slider') else 0.0
+        n_floor = -174.0 + 10*math.log10(bw_mhz * 1e6) + 7.0 + noise_offset
 
         ni = self.noise_slider.value()
         n_interf = -999.0 if ni == 0 else n_floor + (ni / 100.0) * 50.0
@@ -3064,14 +3171,14 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         else:
             is_hung = False
             if self.last_frame_recv == 0.0:
-                # Give FFmpeg at least 6 seconds to start up and analyze headers before assuming it's hung
-                if now - getattr(self, 'decoder_start_time', now) > 6.0:
+                # Give FFmpeg at least 12 seconds to start up and analyze headers before assuming it's hung
+                if now - getattr(self, 'decoder_start_time', now) > 12.0:
                     if self.chk_enable_rx_preview.isChecked():
                         self._draw_no_signal()
                     is_hung = True
             else:
-                # Once running, if no frame in 2.5s, assume crash/hang
-                if now - self.last_frame_recv > 2.5:
+                # Once running, if no frame in 5.0s, assume crash/hang
+                if now - self.last_frame_recv > 5.0:
                     if self.chk_enable_rx_preview.isChecked():
                         self._draw_no_signal()
                     is_hung = True
@@ -3079,7 +3186,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             # Active Watchdog: If we have a signal lock but FFmpeg is hung (heavy datamosh crash),
             # forcefully kill and respawn the decoder processes.
             if is_hung and getattr(self, 'mpeg_decoder', None):
-                if now - getattr(self, 'last_recovery_time', 0.0) > 8.0:
+                if now - getattr(self, 'last_recovery_time', 0.0) > 15.0:
                     print("[RX] Stream hung detected (FFmpeg stalled). Forcing decoder recovery...")
                     self.last_recovery_time = now
                     self.decoder_start_time = now  # Reset startup timer so it doesn't instantly trigger again
@@ -3094,6 +3201,12 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
                     threading.Thread(target=recover, daemon=True).start()
 
     def _get_font(self, name="DejaVuSans-Bold.ttf", size=12):
+        try:
+            return ImageFont.truetype(name, size)
+        except Exception:
+            for alt in [name, "DejaVuSans.ttf", "LiberationSans-Regular.ttf", "Arial.ttf"]:
+                try: return ImageFont.truetype(alt, size)
+                except Exception: pass
         return ImageFont.load_default()
 
     def _draw_no_signal(self):
@@ -3144,6 +3257,12 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             border_hex = self.custom_border_edit.text() if hasattr(self, 'custom_border_edit') else "#dc4646"
             title_text = self.custom_title_edit.text() if hasattr(self, 'custom_title_edit') else "CUSTOM BOX  —  NO SIGNAL"
             msg_text = self.custom_msg_edit.text() if hasattr(self, 'custom_msg_edit') else ""
+            pattern_idx = self.custom_pattern_combo.currentIndex() if hasattr(self, 'custom_pattern_combo') else 0
+            img_path = self.custom_image_edit.text() if hasattr(self, 'custom_image_edit') else ""
+
+            font_fam = self.custom_font_family_edit.text() if hasattr(self, 'custom_font_family_edit') else "DejaVuSans"
+            try: font_sz = int(self.custom_font_size_edit.text()) if hasattr(self, 'custom_font_size_edit') else 22
+            except Exception: font_sz = 22
 
             def hex_to_rgb(h):
                 h = h.lstrip('#')
@@ -3153,19 +3272,97 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             bg_color = hex_to_rgb(bg_hex)
             border_color = hex_to_rgb(border_hex)
 
-            img  = Image.new('RGB', (W, H), bg_color)
+            def draw_color_bars(draw_obj, w, h):
+                colors = [
+                    (255, 255, 255), (255, 255, 0), (0, 255, 255), (0, 255, 0),
+                    (255, 0, 255), (255, 0, 0), (0, 0, 255), (0, 0, 0)
+                ]
+                bar_w = w // len(colors)
+                for i, col in enumerate(colors):
+                    draw_obj.rectangle([i*bar_w, 0, (i+1)*bar_w if i < len(colors)-1 else w, h], fill=col)
+
+            def draw_smpte_bars(draw_obj, w, h):
+                h1 = (h * 2) // 3
+                colors = [
+                    (192, 192, 192), (192, 192, 0), (0, 192, 192), (0, 192, 0),
+                    (192, 0, 192), (192, 0, 0), (0, 0, 192)
+                ]
+                bar_w = w // len(colors)
+                for i, col in enumerate(colors):
+                    draw_obj.rectangle([i*bar_w, 0, (i+1)*bar_w if i < len(colors)-1 else w, h1], fill=col)
+                h2 = h1 + h // 12
+                rev_colors = [
+                    (0, 0, 192), (19, 19, 19), (192, 0, 192), (19, 19, 19),
+                    (0, 192, 192), (19, 19, 19), (192, 192, 192)
+                ]
+                for i, col in enumerate(rev_colors):
+                    draw_obj.rectangle([i*bar_w, h1, (i+1)*bar_w if i < len(rev_colors)-1 else w, h2], fill=col)
+                h3 = h
+                draw_obj.rectangle([0, h2, bar_w, h3], fill=(255, 255, 255))
+                draw_obj.rectangle([bar_w, h2, bar_w*2, h3], fill=(0, 0, 0))
+                draw_obj.rectangle([bar_w*2, h2, bar_w*3, h3], fill=(0, 33, 79))
+                draw_obj.rectangle([bar_w*3, h2, bar_w*4, h3], fill=(255, 255, 255))
+                draw_obj.rectangle([bar_w*4, h2, bar_w*5, h3], fill=(51, 0, 114))
+                draw_obj.rectangle([bar_w*5, h2, w, h3], fill=(19, 19, 19))
+
+            def draw_grid(draw_obj, w, h):
+                draw_obj.rectangle([0, 0, w, h], fill=(0, 0, 0))
+                grid_size = 40
+                for x in range(0, w, grid_size):
+                    draw_obj.line([x, 0, x, h], fill=(255, 255, 255), width=1)
+                for y in range(0, h, grid_size):
+                    draw_obj.line([0, y, w, y], fill=(255, 255, 255), width=1)
+
+            def draw_white_noise(w, h):
+                arr = np.random.randint(0, 256, (h, w, 3), dtype=np.uint8)
+                return Image.fromarray(arr, 'RGB')
+
+            def draw_custom_image(w, h, path):
+                if path and os.path.exists(path):
+                    try:
+                        img_loaded = Image.open(path).convert('RGB')
+                        return img_loaded.resize((w, h), Image.Resampling.LANCZOS)
+                    except Exception as e:
+                        print(f"[THEME] Failed to load custom image: {e}")
+                return None
+
+            img = None
+            if pattern_idx == 1:
+                img = Image.new('RGB', (W, H), (0, 0, 0))
+                draw_smpte_bars(ImageDraw.Draw(img), W, H)
+            elif pattern_idx == 2:
+                img = Image.new('RGB', (W, H), (0, 0, 0))
+                draw_color_bars(ImageDraw.Draw(img), W, H)
+            elif pattern_idx == 3:
+                img = Image.new('RGB', (W, H), (0, 0, 0))
+                draw_grid(ImageDraw.Draw(img), W, H)
+            elif pattern_idx == 4:
+                img = draw_white_noise(W, H)
+            elif pattern_idx == 5:
+                img = draw_custom_image(W, H, img_path)
+
+            if img is None:
+                img = Image.new('RGB', (W, H), bg_color)
+
             draw = ImageDraw.Draw(img)
-            fb   = self._get_font("DejaVuSans-Bold.ttf", 30)
-            fn   = self._get_font("DejaVuSans.ttf", 22)
-            draw.text((44, 56), title_text, fill=border_color, font=fb)
-            draw.line([44, 100, W-44, 100], fill=border_color, width=4)
-            
+            fb = self._get_font(font_fam + "-Bold.ttf" if not font_fam.lower().endswith(('.ttf', '.otf')) else font_fam, int(font_sz * 1.36))
+            fn = self._get_font(font_fam + ".ttf" if not font_fam.lower().endswith(('.ttf', '.otf')) else font_fam, font_sz)
+
+            # Paste semi-transparent card box in the center
+            overlay = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+            ol_draw = ImageDraw.Draw(overlay)
+            ol_draw.rectangle([44, 44, W-44, H-44], fill=bg_color + (180,), outline=border_color + (255,), width=4)
+            img.paste(overlay, (0, 0), overlay)
+
+            draw.text((66, 66), title_text, fill=border_color, font=fb)
+            draw.line([66, 110, W-66, 110], fill=border_color, width=4)
+
             words = msg_text.split(' ')
             lines = []
             cur_line = ""
             for word in words:
                 test_line = cur_line + (" " if cur_line else "") + word
-                if len(test_line) * 14 > W - 88:
+                if len(test_line) * (font_sz * 0.6) > W - 132:
                     lines.append(cur_line)
                     cur_line = word
                 else:
@@ -3174,7 +3371,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
                 lines.append(cur_line)
 
             for i, line in enumerate(lines[:8]):
-                draw.text((44, 130 + i*40), line, fill=(255, 255, 255), font=fn)
+                draw.text((66, 130 + i * (font_sz + 12)), line, fill=(255, 255, 255), font=fn)
 
         self.current_rx_frame = img.copy()
         qimg = QImage(img.tobytes('raw','RGB'), W, H, W * 3, QImage.Format_RGB888)
