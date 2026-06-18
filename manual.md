@@ -1,0 +1,121 @@
+# DTV SDR Modulation Playground - User Manual
+
+Welcome to the **Digital Television (DTV) SDR Modulation & Link Budget Playground**! This playground simulates a complete digital TV broadcasting system (transmitter, RF channel, propagation impairments, and hardware-less receiver) running entirely in software on your PC.
+
+---
+
+## Table of Contents
+1. [System Requirements](#system-requirements)
+2. [Installation & Setup](#installation--setup)
+3. [Core Features](#core-features)
+4. [Settings & Configuration](#settings--configuration)
+5. [Quick Presets Guide](#quick-presets-guide)
+6. [Recording & Muxing](#recording--muxing)
+7. [Troubleshooting & FAQs](#troubleshooting--faqs)
+
+---
+
+## System Requirements
+
+This software is compatible with **Windows**, **macOS**, and **Linux**. It utilizes native subprocesses for high-performance video encoding and decoding.
+
+*   **Python**: Version 3.7 or higher.
+*   **Python Packages**: `PyQt5`, `Pillow`, `numpy`.
+*   **Media Tools (Required in System PATH)**:
+    *   `ffmpeg`: Used to transcode, encode, and decode video streams.
+    *   `ffplay`: Used for cross-platform audio playback (on Windows, macOS, and Linux fallbacks) and stream verification.
+    *   `aplay` *(Optional, Linux-only)*: Standard ALSA audio player (used natively on Linux before falling back to `ffplay`).
+
+---
+
+## Installation & Setup
+
+### 1. Install Media Tools
+Ensure `ffmpeg` and `ffplay` are installed and added to your system's environment variables (`PATH`).
+*   **Windows**: Download builds from [Gyan.dev](https://www.gyan.dev/ffmpeg/builds/) or use `winget install Gyan.FFmpeg`.
+*   **macOS**: Install via Homebrew: `brew install ffmpeg`.
+*   **Linux**: Install via your package manager:
+    *   *Debian/Ubuntu*: `sudo apt update && sudo apt install ffmpeg alsa-utils`
+    *   *Fedora*: `sudo dnf install ffmpeg alsa-utils`
+    *   *Arch Linux*: `sudo pacman -S ffmpeg alsa-utils`
+
+### 2. Install Python Dependencies
+Run the following command in your terminal/command prompt:
+```bash
+pip install PyQt5 Pillow numpy
+```
+
+### 3. Run the Playground
+Launch the application:
+```bash
+python3 dtv_playground.py
+```
+
+---
+
+## Core Features
+
+*   **Authentic Signal Outages (No Fake Glitches)**: Unlike simpler tools, this simulation does not apply green overlay scripts or fake static. Instead, it corrupts actual MPEG-2 Transport Stream (MPEG-TS) packets at the byte level. The receiver's FFmpeg decoder processes this damaged stream natively, producing authentic motion smears, macroblock freezing, and audio dropouts.
+*   **Real-time Link Budget DSP**: Tweak transmit power, receiver distance, and LNA pre-amplification. The signal quality calculation uses real free-space path loss (FSPL), atmospheric rain fade, and foliage terrain losses.
+*   **Flicker-Free Interlaced Scan**: Toggle interlaced scan mode to see true temporal combing/weaving artifacts without seizure-inducing 30Hz screens.
+*   **Interactive Playlist Control Room**: Add and organize multiple files, seek smoothly, play, pause, and navigate tracks.
+*   **Double-Click Fullscreen**: Double-click either the **TX Preview** or **RX Display** screens to view the video in frameless fullscreen mode. Press the **Escape** key (or double-click again) to exit.
+
+---
+
+## Settings & Configuration
+
+### Hardware Acceleration (AMD / Intel / NVIDIA / Software)
+In the **Media & Quality** tab, under **Hardware Acceleration Settings**, you can choose how FFmpeg encodes the broadcast:
+1.  **Auto-Detect (Recommended)**: Probes your GPU at startup. It will try Intel QuickSync Video (`mpeg2_qsv`) first, then VAAPI (`mpeg2_vaapi` - Linux standard for AMD/Intel), and fall back to Software if unsupported. Note: VA-API is only supported on Linux; on Windows and macOS it is not available.
+2.  **Intel QSV**: Forces Intel CPU/GPU hardware encoding.
+3.  **VAAPI**: Forces Linux Video Acceleration API (ideal for AMD/Intel integrated/discrete GPUs).
+4.  **Software Only (Universal)**: Disables GPU acceleration, running the standard CPU encoder (`mpeg2video`). *NVIDIA GPUs do not support hardware MPEG-2 encoding (only H.264/HEVC/AV1), so NVIDIA users should select Software Only or Auto-Detect.*
+
+### Audio Volume & Squelch
+*   **Digital Squelch**: When signal quality drops below 15%, the audio decoder squelches (silences) the output to prevent loud popping, clicking, or deafening static.
+*   **Independent Mute Controls**: Below both displays, you can independently toggle audio playback for the clean preview and the received signal.
+
+---
+
+## Quick Presets Guide
+
+Select these from the **Quick Presets** dropdown in the Tuner tab to immediately demonstrate different DTV scenarios:
+
+1.  **ATSC 480i Local**: Standard definition local TV under perfect reception using ATSC 8VSB modulation.
+2.  **DVB-T 720p Rooftop**: High-definition terrestrial television using DVB-T standard at 25 km.
+3.  **DVB-S2 1080i Satellite**: Ku-band satellite television under clear sky conditions at 38,000 km altitude.
+4.  **J.83B 1080p Cable**: Digital cable set-top box under perfect coaxial connection.
+5.  **Tropospheric DX 480i**: Long-distance terrestrial reception showing atmospheric propagation stability.
+6.  **Sporadic E-Skip 720p**: Dynamic fading simulation at 800 km distance on the VHF band.
+7.  **ATSC 1080i Fringe**: Low signal margin reception. The signal is right on the cliff edge of dropping lock.
+8.  **DVB-T2 1080p Modern**: High-efficiency European terrestrial standard.
+9.  **Satellite Rain Fade**: Satellite link in the Ka-band showing signal blockages under heavy thunderstorms.
+10. **Cable High Noise**: Simulates severe static/interference in a building's coaxial network.
+11. **Severe Multipath Ghosting**: Multipath reflection resulting in video ghosting.
+12. **Datamoshing Cliff Edge**: The sweet spot for datamoshing! Signal power and distance are set so the decoder is flooded with errors, creating constant block-smear artifacts.
+
+---
+
+## Recording & Muxing
+
+*   **Synchronized Recording**: When recording, the app concurrently captures the visual screen frames in memory and saves raw incoming MPEG-TS UDP packets to a background `.ts` capture file.
+*   **Transcoding**: When you click "Save Recording", the app uses FFmpeg to merge these inputs. The resulting `.mp4` file contains the exact visual artifacts, static cards, and audio sync of your session.
+*   **Outage Recording**: If you record while there is "No Signal", the app automatically falls back to video-only recording, saving the themed warning screens to the MP4 file without errors or hangs.
+*   **Recording Resolution Picker**: Select from standard resolutions (480p up to 1080p) or choose "Follow Stream Resolution" to automatically scale the output to match the current broadcast standard.
+
+---
+
+## Troubleshooting & FAQs
+
+#### Q: The RX Screen says "NO SIGNAL" constantly, even with 100% Signal Lock.
+*   **A**: FFmpeg might not be detecting the stream headers. Try clicking Pause and then Play (or choosing another preset) to restart the encoder and force FFmpeg to parse the stream again. Ensure `ffmpeg` is globally installed.
+
+#### Q: The transcode blocks or hangs when saving a recording.
+*   **A**: This is now prevented by ignoring the corrupted video packets in the captured `.ts` file and using the clean visual buffers in memory. If it still hangs, verify that `ffmpeg` is not being blocked by system permissions.
+
+#### Q: Audio is choppy or laggy.
+*   **A**: Choppy audio can happen if the CPU is heavily loaded. Try lowering the transmit resolution (e.g. from 1080p to 480p/720p) or switching the **Hardware Acceleration Settings** to a different option to reduce CPU encoding overhead.
+
+#### Q: The player time flashes "Ideal" / "drift".
+*   **A**: This is a known variable conflict that has been completely fixed. The RF timing offset label and the media player's timeline progress label now use separate variables.

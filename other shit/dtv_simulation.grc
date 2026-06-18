@@ -1,0 +1,970 @@
+options:
+  parameters:
+    author: 'Antigravity'
+    catch_exceptions: 'True'
+    category: '[GRC Hier Blocks]'
+    cmake_opt: ''
+    comment: ''
+    copyright: ''
+    description: 'Digital Television Modulation Playground simulating ATSC, DVB-S2, DVB-T, DVB-T2, and J.83B'
+    filename: '/home/hunter/dtv_simulation.grc'
+    gencode_link: ''
+    generate_options: qt_gui
+    hier_block_src_path: '.:'
+    id: dtv_simulation
+    max_nouts: '0'
+    output_language: python
+    placement: (0,0)
+    qt_qss_theme: ''
+    realtime_scheduling: ''
+    run: 'True'
+    run_command: '{python} -u {filename}'
+    run_options: prompt
+    sizing_mode: fixed
+    thread_safe_setters: ''
+    title: Digital Television Modulation Playground
+    window_size: (1200,800)
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 8]
+    rotation: 0
+    state: enabled
+
+blocks:
+- name: samp_rate
+  id: variable
+  parameters:
+    comment: ''
+    value: '500000'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 120]
+    rotation: 0
+    state: enabled
+
+- name: noise_level
+  id: variable_qtgui_range
+  parameters:
+    comment: ''
+    gui_hint: ''
+    label: Channel Noise Voltage
+    min_len: '200'
+    orient: QtCore.Qt.Horizontal
+    rangeType: float
+    start: '0.0'
+    step: '0.005'
+    stop: '0.5'
+    value: '0.0'
+    widget: counter_slider
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 200]
+    rotation: 0
+    state: enabled
+
+- name: active_standard
+  id: variable_qtgui_chooser
+  parameters:
+    comment: ''
+    gui_hint: ''
+    label: DTV Standard
+    label0: ATSC (8VSB / 8-PAM)
+    label1: DVB-S2 (8-PSK)
+    label2: ITU-T J.83B (64-QAM)
+    label3: DVB-T2 (Rotated 64-QAM)
+    label4: DVB-T (OFDM - QPSK)
+    labels: []
+    num_opts: '5'
+    option0: '0'
+    option1: '1'
+    option2: '2'
+    option3: '3'
+    option4: '4'
+    options: '[0, 1, 2, 3, 4]'
+    type: int
+    value: '0'
+    widget: combo_box
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 320]
+    rotation: 0
+    state: enabled
+
+- name: tx_path_select
+  id: variable
+  parameters:
+    comment: ''
+    value: '0 if active_standard < 2 else 1 if active_standard < 4 else 2'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 480]
+    rotation: 0
+    state: enabled
+
+- name: freq_offset
+  id: variable
+  parameters:
+    comment: ''
+    value: '0.0'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [200, 480]
+    rotation: 0
+    state: enabled
+
+- name: timing_offset
+  id: variable
+  parameters:
+    comment: ''
+    value: '1.0'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [360, 480]
+    rotation: 0
+    state: enabled
+
+- name: multipath_gain
+  id: variable
+  parameters:
+    comment: ''
+    value: '0.0'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [520, 480]
+    rotation: 0
+    state: enabled
+
+- name: atsc_points
+  id: variable
+  parameters:
+    comment: ''
+    value: '[-7, -5, -3, -1, 1, 3, 5, 7]'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [200, 8]
+    rotation: 0
+    state: enabled
+
+- name: dvbs2_points
+  id: variable
+  parameters:
+    comment: ''
+    value: '[1+0j, 0.707+0.707j, 0+1j, -0.707+0.707j, -1+0j, -0.707-0.707j, 0-1j, 0.707-0.707j]'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [360, 8]
+    rotation: 0
+    state: enabled
+
+- name: j83b_points
+  id: variable
+  parameters:
+    comment: ''
+    value: '[complex(x, y) for x in [-7,-5,-3,-1,1,3,5,7] for y in [-7,-5,-3,-1,1,3,5,7]]'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [520, 8]
+    rotation: 0
+    state: enabled
+
+- name: dvbt2_points
+  id: variable
+  parameters:
+    comment: ''
+    value: '[complex(x, y) * (0.8746 + 0.4848j) for x in [-7,-5,-3,-1,1,3,5,7] for y in [-7,-5,-3,-1,1,3,5,7]]'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [680, 8]
+    rotation: 0
+    state: enabled
+
+- name: const_points_choice
+  id: variable
+  parameters:
+    comment: ''
+    value: '[atsc_points, dvbs2_points, j83b_points, dvbt2_points][active_standard if active_standard < 4 else 0]'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [840, 8]
+    rotation: 0
+    state: enabled
+
+- name: atsc_const
+  id: variable_constellation
+  parameters:
+    comment: ''
+    const_points: atsc_points
+    dims: '1'
+    normalization: digital.constellation.AMPLITUDE_NORMALIZATION
+    npwr: '1.0'
+    precision: '8'
+    rot_sym: '2'
+    soft_dec_lut: None
+    sym_map: '[0, 1, 2, 3, 4, 5, 6, 7]'
+    type: calcdist
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [200, 80]
+    rotation: 0
+    state: enabled
+
+- name: dvbs2_const
+  id: variable_constellation
+  parameters:
+    comment: ''
+    const_points: '[]'
+    dims: '1'
+    normalization: digital.constellation.AMPLITUDE_NORMALIZATION
+    npwr: '1.0'
+    precision: '8'
+    rot_sym: '4'
+    soft_dec_lut: None
+    sym_map: '[0, 1, 2, 3, 4, 5, 6, 7]'
+    type: 8psk
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [360, 80]
+    rotation: 0
+    state: enabled
+
+- name: j83b_const
+  id: variable_constellation
+  parameters:
+    comment: ''
+    const_points: j83b_points
+    dims: '1'
+    normalization: digital.constellation.AMPLITUDE_NORMALIZATION
+    npwr: '1.0'
+    precision: '8'
+    rot_sym: '4'
+    soft_dec_lut: None
+    sym_map: list(range(64))
+    type: calcdist
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [520, 80]
+    rotation: 0
+    state: enabled
+
+- name: dvbt2_const
+  id: variable_constellation
+  parameters:
+    comment: ''
+    const_points: dvbt2_points
+    dims: '1'
+    normalization: digital.constellation.AMPLITUDE_NORMALIZATION
+    npwr: '1.0'
+    precision: '8'
+    rot_sym: '4'
+    soft_dec_lut: None
+    sym_map: list(range(64))
+    type: calcdist
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [680, 80]
+    rotation: 0
+    state: enabled
+
+- name: const_choice
+  id: variable
+  parameters:
+    comment: ''
+    value: '[atsc_const, dvbs2_const, j83b_const, dvbt2_const][active_standard if active_standard < 4 else 0]'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [840, 80]
+    rotation: 0
+    state: enabled
+
+- name: udp_source
+  id: network_udp_source
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    header: '0'
+    ipv6: 'False'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    notify_missed: 'False'
+    payloadsize: '1470'
+    port: '5001'
+    src_zeros: 'False'
+    type: byte
+    vlen: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [200, 200]
+    rotation: 0
+    state: enabled
+
+- name: tx_selector
+  id: blocks_selector
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    enabled: 'True'
+    input_index: '0'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    num_inputs: '1'
+    num_outputs: '3'
+    output_index: tx_path_select
+    type: byte
+    vlen: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [380, 200]
+    rotation: 0
+    state: enabled
+
+- name: unpack_8_p1
+  id: blocks_unpack_k_bits_bb
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    k: '8'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [560, 184]
+    rotation: 0
+    state: enabled
+
+- name: pack_3_p1
+  id: blocks_pack_k_bits_bb
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    k: '3'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [680, 184]
+    rotation: 0
+    state: enabled
+
+- name: map_symbols_p1
+  id: digital_chunks_to_symbols_xx
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    dimension: '1'
+    in_type: byte
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    num_ports: '1'
+    out_type: complex
+    symbol_table: const_points_choice
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [800, 176]
+    rotation: 0
+    state: enabled
+
+- name: unpack_8_p2
+  id: blocks_unpack_k_bits_bb
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    k: '8'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [560, 280]
+    rotation: 0
+    state: enabled
+
+- name: pack_6_p2
+  id: blocks_pack_k_bits_bb
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    k: '6'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [680, 280]
+    rotation: 0
+    state: enabled
+
+- name: map_symbols_p2
+  id: digital_chunks_to_symbols_xx
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    dimension: '1'
+    in_type: byte
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    num_ports: '1'
+    out_type: complex
+    symbol_table: const_points_choice
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [800, 272]
+    rotation: 0
+    state: enabled
+
+- name: stream_to_tagged_p3
+  id: blocks_stream_to_tagged_stream
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    len_tag_key: '"packet_len"'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    packet_len: '1470'
+    type: byte
+    vlen: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [560, 368]
+    rotation: 0
+    state: enabled
+
+- name: ofdm_tx_p3
+  id: digital_ofdm_tx
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    cp_len: '16'
+    fft_len: '64'
+    header_mod: '"BPSK"'
+    log: 'False'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    occupied_carriers: '([-26, -25, -24, -23, -22, -20, -19, -18, -17, -16, -15, -14, -13, -12, -11, -10, -9, -8, -6, -5, -4, -3, -2, -1, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 26],)'
+    packet_len_key: '"packet_len"'
+    payload_mod: '"QPSK"'
+    pilot_carriers: '((-21, -7, 7, 21),)'
+    pilot_symbols: '((1, 1, 1, -1),) * 127'
+    rolloff: '0'
+    scramble_bits: 'True'
+    sync_word1: 'None'
+    sync_word2: 'None'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [780, 340]
+    rotation: 0
+    state: enabled
+
+- name: tx_rf_selector
+  id: blocks_selector
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    enabled: 'True'
+    input_index: tx_path_select
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    num_inputs: '3'
+    num_outputs: '1'
+    output_index: '0'
+    type: complex
+    vlen: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1000, 216]
+    rotation: 0
+    state: enabled
+
+- name: rf_throttle
+  id: blocks_throttle2
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    ignoretag: 'True'
+    limit: auto
+    maximum: '0.1'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    samples_per_second: samp_rate
+    type: complex
+    vlen: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1150, 150]
+    rotation: 0
+    state: enabled
+
+- name: channel_model
+  id: channels_channel_model
+  parameters:
+    affinity: ''
+    alias: ''
+    block_tags: 'False'
+    comment: ''
+    epsilon: timing_offset
+    freq_offset: freq_offset
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    noise_voltage: noise_level
+    seed: '0'
+    taps: '[1.0, 0.0, multipath_gain]'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1290, 216]
+    rotation: 0
+    state: enabled
+
+- name: rf_spectrum
+  id: qtgui_freq_sink_x
+  parameters:
+    affinity: ''
+    alias: ''
+    alpha1: '1.0'
+    alpha10: '1.0'
+    alpha2: '1.0'
+    alpha3: '1.0'
+    alpha4: '1.0'
+    alpha5: '1.0'
+    alpha6: '1.0'
+    alpha7: '1.0'
+    alpha8: '1.0'
+    alpha9: '1.0'
+    autoscale: 'False'
+    average: '0.2'
+    axislabels: 'True'
+    bw: samp_rate
+    color1: '"blue"'
+    color10: '"dark blue"'
+    color2: '"red"'
+    color3: '"green"'
+    color4: '"black"'
+    color5: '"cyan"'
+    color6: '"magenta"'
+    color7: '"yellow"'
+    color8: '"dark red"'
+    color9: '"dark green"'
+    comment: ''
+    ctrlpanel: 'False'
+    fc: '0'
+    fftsize: '512'
+    freqhalf: 'True'
+    grid: 'True'
+    gui_hint: ''
+    label: Relative Gain
+    label1: RF Spectrum
+    label10: ''
+    label2: ''
+    label3: ''
+    label4: ''
+    label5: ''
+    label6: ''
+    label7: ''
+    label8: ''
+    label9: ''
+    legend: 'True'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    nconnections: '1'
+    norm_window: 'False'
+    showports: 'False'
+    tr_chan: '0'
+    tr_level: '0.0'
+    tr_mode: qtgui.TRIG_MODE_FREE
+    type: complex
+    update_time: '0.05'
+    wintype: window.WIN_BLACKMAN_hARRIS
+    ymax: '10'
+    ymin: '-140'
+    yunits: dB
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1480, 120]
+    rotation: 0
+    state: enabled
+
+- name: rf_constellation
+  id: qtgui_constellation_sink_x
+  parameters:
+    affinity: ''
+    alias: ''
+    alpha1: '1.0'
+    alpha10: '1.0'
+    alpha2: '1.0'
+    alpha3: '1.0'
+    alpha4: '1.0'
+    alpha5: '1.0'
+    alpha6: '1.0'
+    alpha7: '1.0'
+    alpha8: '1.0'
+    alpha9: '1.0'
+    autoscale: 'False'
+    axislabels: 'True'
+    color1: '"blue"'
+    color10: '"red"'
+    color2: '"red"'
+    color3: '"red"'
+    color4: '"red"'
+    color5: '"red"'
+    color6: '"red"'
+    color7: '"red"'
+    color8: '"red"'
+    color9: '"red"'
+    comment: ''
+    grid: 'True'
+    gui_hint: ''
+    label1: RF Constellation
+    label10: ''
+    label2: ''
+    label3: ''
+    label4: ''
+    label5: ''
+    label6: ''
+    label7: ''
+    label8: ''
+    label9: ''
+    legend: 'True'
+    marker1: '0'
+    marker10: '0'
+    marker2: '0'
+    marker3: '0'
+    marker4: '0'
+    marker5: '0'
+    marker6: '0'
+    marker7: '0'
+    marker8: '0'
+    marker9: '0'
+    name: '""'
+    nconnections: '1'
+    size: '1024'
+    style1: '0'
+    style10: '0'
+    style2: '0'
+    style3: '0'
+    style4: '0'
+    style5: '0'
+    style6: '0'
+    style7: '0'
+    style8: '0'
+    style9: '0'
+    tr_chan: '0'
+    tr_level: '0.0'
+    tr_mode: qtgui.TRIG_MODE_FREE
+    type: complex
+    update_time: '0.05'
+    xmax: '9'
+    xmin: '-9'
+    ymax: '9'
+    ymin: '-9'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1480, 240]
+    rotation: 0
+    state: enabled
+
+- name: rx_rf_selector
+  id: blocks_selector
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    enabled: 'True'
+    input_index: '0'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    num_inputs: '1'
+    num_outputs: '3'
+    output_index: tx_path_select
+    type: complex
+    vlen: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [200, 560]
+    rotation: 0
+    state: enabled
+
+- name: decode_symbols_p1
+  id: digital_constellation_decoder_cb
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    constellation: const_choice
+    maxoutbuf: '0'
+    minoutbuf: '0'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [400, 544]
+    rotation: 0
+    state: enabled
+
+- name: unpack_3_p1
+  id: blocks_unpack_k_bits_bb
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    k: '3'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [560, 544]
+    rotation: 0
+    state: enabled
+
+- name: pack_8_p1
+  id: blocks_pack_k_bits_bb
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    k: '8'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [680, 544]
+    rotation: 0
+    state: enabled
+
+- name: decode_symbols_p2
+  id: digital_constellation_decoder_cb
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    constellation: const_choice
+    maxoutbuf: '0'
+    minoutbuf: '0'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [400, 624]
+    rotation: 0
+    state: enabled
+
+- name: unpack_6_p2
+  id: blocks_unpack_k_bits_bb
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    k: '6'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [560, 624]
+    rotation: 0
+    state: enabled
+
+- name: pack_8_p2
+  id: blocks_pack_k_bits_bb
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    k: '8'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [680, 624]
+    rotation: 0
+    state: enabled
+
+- name: ofdm_rx_p3
+  id: digital_ofdm_rx
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    cp_len: '16'
+    fft_len: '64'
+    header_mod: '"BPSK"'
+    log: 'False'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    occupied_carriers: '([-26, -25, -24, -23, -22, -20, -19, -18, -17, -16, -15, -14, -13, -12, -11, -10, -9, -8, -6, -5, -4, -3, -2, -1, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 26],)'
+    packet_len_key: '"packet_len"'
+    payload_mod: '"QPSK"'
+    pilot_carriers: '((-21, -7, 7, 21),)'
+    pilot_symbols: '((1, 1, 1, -1),) * 127'
+    scramble_bits: 'True'
+    sync_word1: 'None'
+    sync_word2: 'None'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [400, 708]
+    rotation: 0
+    state: enabled
+
+- name: rx_byte_selector
+  id: blocks_selector
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    enabled: 'True'
+    input_index: tx_path_select
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    num_inputs: '3'
+    num_outputs: '1'
+    output_index: '0'
+    type: byte
+    vlen: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [880, 576]
+    rotation: 0
+    state: enabled
+
+- name: udp_sink
+  id: network_udp_sink
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: ''
+    host: 127.0.0.1
+    ipv6: 'False'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    payloadsize: '1470'
+    port: '5002'
+    send_eof: 'False'
+    type: byte
+    vlen: '1'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [1060, 560]
+    rotation: 0
+    state: enabled
+
+connections:
+- [udp_source, '0', tx_selector, '0']
+- [tx_selector, '0', unpack_8_p1, '0']
+- [tx_selector, '1', unpack_8_p2, '0']
+- [tx_selector, '2', stream_to_tagged_p3, '0']
+- [unpack_8_p1, '0', pack_3_p1, '0']
+- [pack_3_p1, '0', map_symbols_p1, '0']
+- [unpack_8_p2, '0', pack_6_p2, '0']
+- [pack_6_p2, '0', map_symbols_p2, '0']
+- [stream_to_tagged_p3, '0', ofdm_tx_p3, '0']
+- [map_symbols_p1, '0', tx_rf_selector, '0']
+- [map_symbols_p2, '0', tx_rf_selector, '1']
+- [ofdm_tx_p3, '0', tx_rf_selector, '2']
+- [tx_rf_selector, '0', rf_throttle, '0']
+- [rf_throttle, '0', channel_model, '0']
+- [channel_model, '0', rf_spectrum, '0']
+- [channel_model, '0', rf_constellation, '0']
+- [channel_model, '0', rx_rf_selector, '0']
+- [rx_rf_selector, '0', decode_symbols_p1, '0']
+- [rx_rf_selector, '1', decode_symbols_p2, '0']
+- [rx_rf_selector, '2', ofdm_rx_p3, '0']
+- [decode_symbols_p1, '0', unpack_3_p1, '0']
+- [unpack_3_p1, '0', pack_8_p1, '0']
+- [decode_symbols_p2, '0', unpack_6_p2, '0']
+- [unpack_6_p2, '0', pack_8_p2, '0']
+- [pack_8_p1, '0', rx_byte_selector, '0']
+- [pack_8_p2, '0', rx_byte_selector, '1']
+- [ofdm_rx_p3, '0', rx_byte_selector, '2']
+- [rx_byte_selector, '0', udp_sink, '0']
+
+metadata:
+  file_format: 1
+  grc_version: 3.10.12.0
