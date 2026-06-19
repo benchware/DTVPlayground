@@ -544,8 +544,8 @@ class MpegTsDecoderThread(QThread):
                '-fflags', 'nobuffer',
                '-err_detect', 'ignore_err',
                '-ec', 'deblock+favor_inter',
-               '-analyzeduration', '100000',
-               '-probesize', '16384',
+               '-analyzeduration', '500000',
+               '-probesize', '256000',
                '-f', 'mpegts', '-i', 'pipe:0']
             + custom_args_list
             + ['-map', '0:v?',
@@ -568,8 +568,8 @@ class MpegTsDecoderThread(QThread):
              '-max_error_rate', '1.0',
              '-fflags', 'nobuffer',
              '-err_detect', 'ignore_err',
-             '-analyzeduration', '100000',
-             '-probesize', '16384',
+             '-analyzeduration', '500000',
+             '-probesize', '64000',
              '-f', 'mpegts', '-i', 'pipe:0']
             + custom_args_list
             + ['-map', '0:a?',
@@ -3410,8 +3410,8 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         if theme in theme_cfg:
             bg_hex, border_hex = theme_cfg[theme]
             title_text, msg_text = model_cfg.get(model, model_cfg[0])
-            pattern_idx = self.custom_pattern_combo.currentIndex() if hasattr(self, 'custom_pattern_combo') else 0
-            img_path = self.custom_image_edit.text() if hasattr(self, 'custom_image_edit') else ""
+            pattern_idx = 0  # Standard themes always use solid background color for receiver outage
+            img_path = ""
             font_fam = "DejaVuSans"
             font_sz = 22
         else:  # Custom Theme (index 5)
