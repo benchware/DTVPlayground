@@ -3102,11 +3102,22 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             img = Image.fromarray(arr, 'RGB')
         elif pattern_idx == 5: # Custom Image File
             if img_path and os.path.exists(img_path):
-                try:
-                    img_loaded = Image.open(img_path).convert('RGB')
-                    img = img_loaded.resize((w, h), Image.Resampling.LANCZOS)
-                except Exception as e:
-                    print(f"[THEME] Failed to load custom image: {e}")
+                cached_img = getattr(self, '_cached_tx_bg_img', None)
+                cached_path = getattr(self, '_cached_tx_bg_path', None)
+                cached_w = getattr(self, '_cached_tx_bg_w', None)
+                cached_h = getattr(self, '_cached_tx_bg_h', None)
+                if cached_img and cached_path == img_path and cached_w == w and cached_h == h:
+                    img = cached_img
+                else:
+                    try:
+                        img_loaded = Image.open(img_path).convert('RGB')
+                        img = img_loaded.resize((w, h), Image.Resampling.LANCZOS)
+                        self._cached_tx_bg_img = img
+                        self._cached_tx_bg_path = img_path
+                        self._cached_tx_bg_w = w
+                        self._cached_tx_bg_h = h
+                    except Exception as e:
+                        print(f"[THEME] Failed to load custom image: {e}")
             if img is None:
                 img = Image.new('RGB', (w, h), bg_color)
 
@@ -3445,12 +3456,24 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             return Image.fromarray(arr, 'RGB')
 
         def draw_custom_image(w, h, path):
-            if path and os.path.exists(path):
-                try:
-                    img_loaded = Image.open(path).convert('RGB')
-                    return img_loaded.resize((w, h), Image.Resampling.LANCZOS)
-                except Exception as e:
-                    print(f"[THEME] Failed to load custom image: {e}")
+            if not path or not os.path.exists(path):
+                return None
+            cached_img = getattr(self, '_cached_rx_bg_img', None)
+            cached_path = getattr(self, '_cached_rx_bg_path', None)
+            cached_w = getattr(self, '_cached_rx_bg_w', None)
+            cached_h = getattr(self, '_cached_rx_bg_h', None)
+            if cached_img and cached_path == path and cached_w == w and cached_h == h:
+                return cached_img
+            try:
+                img_loaded = Image.open(path).convert('RGB')
+                resized = img_loaded.resize((w, h), Image.Resampling.LANCZOS)
+                self._cached_rx_bg_img = resized
+                self._cached_rx_bg_path = path
+                self._cached_rx_bg_w = w
+                self._cached_rx_bg_h = h
+                return resized
+            except Exception as e:
+                print(f"[THEME] Failed to load custom image: {e}")
             return None
 
         img = None
