@@ -697,9 +697,15 @@ class MpegTsDecoderThread(QThread):
                 raw = proc.stdout.read(CHUNK)
                 if raw:
                     self._write_audio_to_aplay(raw)
-                elif not raw:
+                else:
+                    if self.running:
+                        print("[DEC-A] audio decoder EOF — restarting")
+                        self._respawn('audio_proc', proc)
                     break
-            except Exception:
+            except Exception as e:
+                if self.running:
+                    print(f"[DEC-A] read error: {e} — restarting")
+                    self._respawn('audio_proc', proc)
                 break
 
     def _write_audio_to_aplay(self, pcm: bytes):
@@ -745,8 +751,11 @@ class MpegTsDecoderThread(QThread):
             try:
                 self.aplay_proc.stdin.write(pcm)
                 self.aplay_proc.stdin.flush()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[AUDIO] aplay write failed: {e}")
+                try: self.aplay_proc.terminate()
+                except Exception: pass
+                self.aplay_proc = None
 
     # ── main loop ─────────────────────────────────────────────
     def run(self):
@@ -1201,7 +1210,7 @@ class DtvPlaygroundApp(QMainWindow):
         self._apply_stylesheet(self.current_theme)
 
     def on_theme_changed(self, idx):
-        if idx == 3:
+        if idx == 5:
             if hasattr(self, 'custom_theme_widget'):
                 self.custom_theme_widget.setVisible(True)
         else:
@@ -1634,22 +1643,22 @@ class DtvPlaygroundApp(QMainWindow):
         sk = QGroupBox("Receiver Box Theme"); sv = QVBoxLayout()
         self.theme_combo = QComboBox()
         self.theme_combo.addItems([
-            "ATSC/DVB-T Terrestrial Set-top Box",
-            "DVB-S2 Satellite Receiver Box",
-            "Digital Cable Set-top Box (J.83B)",
+            "Dark Sleek (Default)",
+            "Blue Cyber",
+            "Retro Amber",
+            "Green Matrix",
+            "Light Theme",
             "Custom Designer Theme"
         ])
         self.theme_combo.currentIndexChanged.connect(self.on_theme_changed)
         self.theme_combo.currentIndexChanged.connect(self.on_custom_theme_changed)
         sv.addWidget(self.theme_combo)
 
-        # Custom theme widget designer
-        self.custom_theme_widget = QWidget()
-        custom_layout = QFormLayout()
-        custom_layout.setContentsMargins(0, 4, 0, 0)
-        custom_layout.setSpacing(4)
-
-        # Pattern choice
+        # Pattern Selection Layout (Always visible at the top level of the box)
+        pat_lay = QHBoxLayout()
+        pat_lay.setContentsMargins(0, 4, 0, 0)
+        pat_lbl = QLabel("Test Card / Pattern:")
+        pat_lay.addWidget(pat_lbl)
         self.custom_pattern_combo = QComboBox()
         self.custom_pattern_combo.addItems([
             "Solid Background Color",
@@ -1661,20 +1670,29 @@ class DtvPlaygroundApp(QMainWindow):
         ])
         self.custom_pattern_combo.currentIndexChanged.connect(self.on_pattern_changed)
         self.custom_pattern_combo.currentIndexChanged.connect(self.on_custom_theme_changed)
-        custom_layout.addRow("Test Card / Pattern:", self.custom_pattern_combo)
+        pat_lay.addWidget(self.custom_pattern_combo)
+        sv.addLayout(pat_lay)
 
         # Custom image row widget (hidden by default)
         self.custom_image_widget = QWidget()
         ci_lay = QHBoxLayout(); ci_lay.setContentsMargins(0, 0, 0, 0)
+        ci_lbl = QLabel("Image File:")
         self.custom_image_edit = QLineEdit()
         self.custom_image_edit.textChanged.connect(self.on_custom_theme_changed)
         btn_pick_img = QPushButton("Browse")
         btn_pick_img.clicked.connect(self.pick_custom_image)
+        ci_lay.addWidget(ci_lbl)
         ci_lay.addWidget(self.custom_image_edit)
         ci_lay.addWidget(btn_pick_img)
         self.custom_image_widget.setLayout(ci_lay)
         self.custom_image_widget.setVisible(False)
-        custom_layout.addRow("Image File:", self.custom_image_widget)
+        sv.addWidget(self.custom_image_widget)
+
+        # Custom theme widget designer
+        self.custom_theme_widget = QWidget()
+        custom_layout = QFormLayout()
+        custom_layout.setContentsMargins(0, 4, 0, 0)
+        custom_layout.setSpacing(4)
 
         # Bg color row
         self.custom_bg_edit = QLineEdit("#0f0f12")
@@ -2607,10 +2625,10 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         for w in widgets: w.blockSignals(True)
 
         cfg = {
-            1: dict(service_type=0, std=0, band=1, wx=0, pwr=40, dist=10,  lna=True,  prop=0, theme=0, res=0, il=True,  acodec=1, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
-            2: dict(service_type=0, std=1, band=1, wx=0, pwr=43, dist=25,  lna=True,  prop=0, theme=0, res=2, il=False, acodec=0, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
-            3: dict(service_type=2, std=1, band=4, wx=0, pwr=60, dist=38000, lna=True, prop=0, theme=1, res=3, il=True,  acodec=2, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
-            4: dict(service_type=1, std=0, band=4, wx=0, pwr=38, dist=2,   lna=False, prop=0, theme=2, res=4, il=False, acodec=1, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
+            1: dict(service_type=0, std=0, band=1, wx=0, pwr=40, dist=10,  lna=True,  prop=0, theme=0, res=0, il=True,  acodec=1, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=1),
+            2: dict(service_type=0, std=1, band=1, wx=0, pwr=43, dist=25,  lna=True,  prop=0, theme=0, res=2, il=False, acodec=0, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=2),
+            3: dict(service_type=2, std=1, band=4, wx=0, pwr=60, dist=38000, lna=True, prop=0, theme=1, res=3, il=True,  acodec=2, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=3),
+            4: dict(service_type=1, std=0, band=4, wx=0, pwr=38, dist=2,   lna=False, prop=0, theme=2, res=4, il=False, acodec=1, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=4),
         }.get(idx, {})
 
         if cfg:
@@ -3272,7 +3290,23 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         self.on_impairment_changed()
         lock = self._lock_pct
         now  = time.time()
-        
+
+        # Signal restoration transition check to clear datamosh/deepfried corruption
+        prev_lock = getattr(self, '_last_lock_for_recovery', 100)
+        self._last_lock_for_recovery = lock
+        if prev_lock < 30 and lock >= 50:
+            if getattr(self, 'mpeg_decoder', None):
+                print("[RX] Signal restored. Restarting decoder to clear corruption.")
+                self.decoder_start_time = now
+                self.last_frame_recv = 0.0
+                def recover_restored():
+                    if self.mpeg_decoder:
+                        try: self.mpeg_decoder._respawn('video_proc')
+                        except Exception: pass
+                        try: self.mpeg_decoder._respawn('audio_proc')
+                        except Exception: pass
+                threading.Thread(target=recover_restored, daemon=True).start()
+
         if lock == 0:
             if self.chk_enable_rx_preview.isChecked():
                 self._draw_no_signal()
@@ -3332,8 +3366,8 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
 
         if theme in theme_cfg:
             bg_hex, border_hex, title_text, msg_text = theme_cfg[theme]
-            pattern_idx = 0  # Solid color background
-            img_path = ""
+            pattern_idx = self.custom_pattern_combo.currentIndex() if hasattr(self, 'custom_pattern_combo') else 0
+            img_path = self.custom_image_edit.text() if hasattr(self, 'custom_image_edit') else ""
             font_fam = "DejaVuSans"
             font_sz = 22
         else:  # Custom Theme (index 5)
@@ -3356,7 +3390,14 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         border_color = hex_to_rgb(border_hex)
         
         # Text color
-        text_color = (36, 41, 47) if theme == 4 else (255, 255, 255)
+        if theme == 4:
+            text_color = (36, 41, 47)
+        elif theme == 5:
+            # Custom theme: calculate luminance of bg_color to decide on black or white text
+            lum = 0.299 * bg_color[0] + 0.587 * bg_color[1] + 0.114 * bg_color[2]
+            text_color = (36, 41, 47) if lum > 128 else (255, 255, 255)
+        else:
+            text_color = (255, 255, 255)
 
         def draw_color_bars(draw_obj, w, h):
             colors = [
