@@ -539,8 +539,8 @@ class MpegTsDecoderThread(QThread):
                '-fflags', 'nobuffer',
                '-err_detect', 'ignore_err',
                '-ec', 'deblock+favor_inter',
-               '-analyzeduration', '2000000',
-               '-probesize', '1000000',
+               '-analyzeduration', '100000',
+               '-probesize', '16384',
                '-f', 'mpegts', '-i', 'pipe:0']
             + custom_args_list
             + ['-map', '0:v?',
@@ -563,8 +563,8 @@ class MpegTsDecoderThread(QThread):
              '-max_error_rate', '1.0',
              '-fflags', 'nobuffer',
              '-err_detect', 'ignore_err',
-             '-analyzeduration', '2000000',
-             '-probesize', '1000000',
+             '-analyzeduration', '100000',
+             '-probesize', '16384',
              '-f', 'mpegts', '-i', 'pipe:0']
             + custom_args_list
             + ['-map', '0:a?',
