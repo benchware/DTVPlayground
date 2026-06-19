@@ -171,13 +171,15 @@ class PythonChannelRelay(threading.Thread):
         arr = bytearray(data)
         per_byte_err = min(ber * 10.0, 0.98)
         for off in range(0, len(arr), 188):
-            if off >= len(arr) or arr[off] != 0x47:
+            if off + 188 > len(arr):
+                break
+            if arr[off] != 0x47:
                 continue
             # Header: bytes 1-3 (leave mostly intact — only corrupt occasionally)
             if random.random() < ber * 0.3:
                 arr[off + 1] ^= random.randint(1, 3)   # flip low PID bits
             # Payload: bytes 4-187 (primary corruption target)
-            for i in range(off + 4, min(off + 188, len(arr))):
+            for i in range(off + 4, off + 188):
                 if random.random() < per_byte_err:
                     arr[i] ^= 1 << random.randrange(8)
         return bytes(arr)
@@ -185,34 +187,37 @@ class PythonChannelRelay(threading.Thread):
     def run(self):
         while self.running:
             try:
-                data, _ = self.rx_sock.recvfrom(2048)
-            except socket.timeout:
-                continue
-            except Exception:
-                continue
+                try:
+                    data, _ = self.rx_sock.recvfrom(2048)
+                except socket.timeout:
+                    continue
+                except Exception:
+                    continue
 
-            num_pkts = len(data) // 188
-            if self.parent_win:
-                self.parent_win._tx_pkt_count += num_pkts
+                num_pkts = len(data) // 188
+                if self.parent_win:
+                    self.parent_win._tx_pkt_count += num_pkts
 
-            lock = self.get_lock()
-            ber  = self._ber(lock)
+                lock = self.get_lock()
+                ber  = self._ber(lock)
 
-            # Drop datagrams less aggressively so we can see block artifacts down to 45% lock
-            drop = max(0.0, (ber - 0.05) * 1.5)
-            if random.random() < drop:
-                continue
+                # Drop datagrams less aggressively so we can see block artifacts down to 45% lock
+                drop = max(0.0, (ber - 0.05) * 1.5)
+                if random.random() < drop:
+                    continue
 
-            if self.parent_win:
-                self.parent_win._rx_pkt_count += num_pkts
+                if self.parent_win:
+                    self.parent_win._rx_pkt_count += num_pkts
 
-            if ber > 5e-4:
-                data = self._corrupt_ts(data, ber)
+                if ber > 5e-4:
+                    data = self._corrupt_ts(data, ber)
 
-            try:
-                self.tx_sock.sendto(data, ('127.0.0.1', self.rx_port))
-            except Exception:
-                pass
+                try:
+                    self.tx_sock.sendto(data, ('127.0.0.1', self.rx_port))
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"[RELAY] Unexpected error: {e}")
 
     def stop(self):
         self.running = False
@@ -354,9 +359,9 @@ class MpegTsEncoderThread(QThread):
             has_aud = self._has_audio()
             if has_aud:
                 cmd = (['ffmpeg', '-y', '-loglevel', 'error']
-                       + seek_opt
                        + ['-fflags', '+genpts', '-stream_loop', '-1', '-re',
                           '-i', self.video_file]
+                       + seek_opt
                        + HW_ENC_FLAGS
                        + (['-vf', vf_str] if vf_str else [])
                        + ['-map', '0:v:0', '-map', '0:a:0']
@@ -364,10 +369,10 @@ class MpegTsEncoderThread(QThread):
             else:
                 # Inject silent audio track so the MPEG-TS stream always has audio
                 cmd = (['ffmpeg', '-y', '-loglevel', 'error']
-                       + seek_opt
                        + ['-fflags', '+genpts', '-stream_loop', '-1', '-re',
                           '-i', self.video_file,
                           '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000']
+                       + seek_opt
                        + HW_ENC_FLAGS
                        + (['-vf', vf_str] if vf_str else [])
                        + ['-map', '0:v:0', '-map', '1:a:0']
@@ -802,7 +807,8 @@ class MpegTsDecoderThread(QThread):
             except socket.timeout:
                 continue
             except Exception:
-                break
+                time.sleep(0.01)
+                continue
 
             # Raw MPEG-TS recording
             if self.recording_file:
@@ -1129,9 +1135,9 @@ class DtvPlaygroundApp(QMainWindow):
         if seek_sec > 0:
             seek_opt = ['-ss', f'{seek_sec:.2f}']
 
-        cmd = ['ffmpeg', '-y', '-loglevel', 'error'] + seek_opt + [
+        cmd = ['ffmpeg', '-y', '-loglevel', 'error'] + [
                '-fflags', '+genpts', '-stream_loop', '-1', '-re',
-               '-i', self.video_file,
+               '-i', self.video_file] + seek_opt + [
                '-vf', f'scale={self.preview_w}:{self.preview_h}:flags=fast_bilinear',
                '-r', str(min(self.fps, 30)),
                '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'] + audio_out
@@ -1653,6 +1659,21 @@ class DtvPlaygroundApp(QMainWindow):
         self.theme_combo.currentIndexChanged.connect(self.on_theme_changed)
         self.theme_combo.currentIndexChanged.connect(self.on_custom_theme_changed)
         sv.addWidget(self.theme_combo)
+
+        # Box Model Style Selection (Always visible, decoupled from color themes)
+        mod_lay = QHBoxLayout()
+        mod_lay.setContentsMargins(0, 4, 0, 0)
+        mod_lbl = QLabel("Receiver Box Model:")
+        self.box_model_combo = QComboBox()
+        self.box_model_combo.addItems([
+            "ATSC/DVB-T Antenna Box",
+            "DVB-S2 Satellite Receiver",
+            "Digital Cable TV Box (J.83B)"
+        ])
+        self.box_model_combo.currentIndexChanged.connect(self.on_custom_theme_changed)
+        mod_lay.addWidget(mod_lbl)
+        mod_lay.addWidget(self.box_model_combo)
+        sv.addLayout(mod_lay)
 
         # Pattern Selection Layout (Always visible at the top level of the box)
         pat_lay = QHBoxLayout()
@@ -2277,7 +2298,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         codecs = ['mp2', 'ac3', 'aac']
         if 0 <= idx < len(codecs):
             self.audio_codec = codecs[idx]
-            self._restart_pipeline(restart_decoder=False)
+            self._restart_pipeline(restart_decoder=True)
 
     def on_hw_accel_changed(self, idx):
         global HW_ENC, HW_DEC_FLAGS, HW_ENC_FLAGS, VAAPI_VF
@@ -2615,7 +2636,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         if idx == 0: return
         widgets = [self.service_type_combo, self.std_combo, self.freq_band_combo, self.weather_combo,
                    self.tx_power_slider, self.range_slider, self.lna_checkbox,
-                   self.prop_combo, self.theme_combo, self.res_combo, self.interlace_checkbox,
+                   self.prop_combo, self.theme_combo, self.box_model_combo, self.res_combo, self.interlace_checkbox,
                    self.audio_codec_combo, self.noise_slider, self.freq_slider,
                    self.time_slider, self.fade_slider, self.fps_slider, self.jpg_slider,
                    self.custom_crf_slider, self.custom_preset_combo,
@@ -2625,10 +2646,10 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         for w in widgets: w.blockSignals(True)
 
         cfg = {
-            1: dict(service_type=0, std=0, band=1, wx=0, pwr=40, dist=10,  lna=True,  prop=0, theme=0, res=0, il=True,  acodec=1, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=1),
-            2: dict(service_type=0, std=1, band=1, wx=0, pwr=43, dist=25,  lna=True,  prop=0, theme=0, res=2, il=False, acodec=0, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=2),
-            3: dict(service_type=2, std=1, band=4, wx=0, pwr=60, dist=38000, lna=True, prop=0, theme=1, res=3, il=True,  acodec=2, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=3),
-            4: dict(service_type=1, std=0, band=4, wx=0, pwr=38, dist=2,   lna=False, prop=0, theme=2, res=4, il=False, acodec=1, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=4),
+            1: dict(service_type=0, std=0, band=1, wx=0, pwr=40, dist=10,  lna=True,  prop=0, theme=0, box_model=0, res=0, il=True,  acodec=1, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=1),
+            2: dict(service_type=0, std=1, band=1, wx=0, pwr=43, dist=25,  lna=True,  prop=0, theme=0, box_model=0, res=2, il=False, acodec=0, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=2),
+            3: dict(service_type=2, std=1, band=4, wx=0, pwr=60, dist=38000, lna=True, prop=0, theme=1, box_model=1, res=3, il=True,  acodec=2, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=3),
+            4: dict(service_type=1, std=0, band=4, wx=0, pwr=38, dist=2,   lna=False, prop=0, theme=2, box_model=2, res=4, il=False, acodec=1, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=4),
         }.get(idx, {})
 
         if cfg:
@@ -2647,6 +2668,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             self.lna_checkbox.setChecked(cfg['lna'])
             self.prop_combo.setCurrentIndex(cfg['prop'])
             self.theme_combo.setCurrentIndex(cfg['theme'])
+            if 'box_model' in cfg: self.box_model_combo.setCurrentIndex(cfg['box_model'])
             self.res_combo.setCurrentIndex(cfg['res'])
             self.interlace_checkbox.setChecked(cfg['il'])
             self.audio_codec_combo.setCurrentIndex(cfg['acodec'])
@@ -2701,6 +2723,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             'lna': self.lna_checkbox.isChecked(),
             'prop': self.prop_combo.currentIndex(),
             'theme': self.theme_combo.currentIndex(),
+            'box_model': self.box_model_combo.currentIndex(),
             'res': self.res_combo.currentIndex(),
             'il': self.interlace_checkbox.isChecked(),
             'acodec': self.audio_codec_combo.currentIndex(),
@@ -2747,7 +2770,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             
             widgets = [self.service_type_combo, self.std_combo, self.freq_band_combo, self.weather_combo,
                        self.tx_power_slider, self.range_slider, self.lna_checkbox,
-                       self.prop_combo, self.theme_combo, self.res_combo, self.interlace_checkbox,
+                       self.prop_combo, self.theme_combo, self.box_model_combo, self.res_combo, self.interlace_checkbox,
                        self.audio_codec_combo, self.noise_slider, self.freq_slider,
                        self.time_slider, self.fade_slider, self.fps_slider, self.jpg_slider,
                        self.custom_crf_slider, self.custom_preset_combo,
@@ -2772,6 +2795,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             if 'lna' in cfg: self.lna_checkbox.setChecked(cfg['lna'])
             if 'prop' in cfg: self.prop_combo.setCurrentIndex(cfg['prop'])
             if 'theme' in cfg: self.theme_combo.setCurrentIndex(cfg['theme'])
+            if 'box_model' in cfg: self.box_model_combo.setCurrentIndex(cfg['box_model'])
             if 'res' in cfg: self.res_combo.setCurrentIndex(cfg['res'])
             if 'il' in cfg: self.interlace_checkbox.setChecked(cfg['il'])
             if 'acodec' in cfg:
@@ -3364,19 +3388,28 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
 
     def _draw_no_signal(self):
         theme = self.theme_combo.currentIndex()
+        model = self.box_model_combo.currentIndex() if hasattr(self, 'box_model_combo') else 0
         W, H  = 960, 540
 
-        # Pre-configured theme maps: (bg_hex, border_hex, title, message)
+        # Pre-configured color theme maps: (bg_hex, border_hex)
         theme_cfg = {
-            0: ("#0f0f12", "#dc4646", "NO DIGITAL SIGNAL", "Check antenna & coaxial connection. Signal outage detected."),
-            1: ("#0a0e17", "#00f0ff", "SYSTEM OFFLINE", "Re-establishing satellite uplink connection... Searching transponder."),
-            2: ("#1a1000", "#ffb000", "MONOCHROME CRT - NO SIGNAL", "Check vertical sync and RF carrier signal feed."),
-            3: ("#000000", "#00ff00", "MATRIX OUTAGE", "Carrier signal lost in network loop. Scanning frequency block."),
-            4: ("#f0f0f0", "#24292f", "SIGNAL DISCONNECTED", "Please check coaxial wall outlet and input connection cables.")
+            0: ("#0f0f12", "#dc4646"),
+            1: ("#0a0e17", "#00f0ff"),
+            2: ("#1a1000", "#ffb000"),
+            3: ("#000000", "#00ff00"),
+            4: ("#f0f0f0", "#24292f")
+        }
+
+        # Pre-configured box model text maps: (title, message)
+        model_cfg = {
+            0: ("NO DIGITAL SIGNAL", "Check antenna & coaxial connection. Signal outage detected."),
+            1: ("SYSTEM OFFLINE", "Re-establishing satellite uplink connection... Searching transponder."),
+            2: ("SIGNAL DISCONNECTED", "Please check coaxial wall outlet and input connection cables.")
         }
 
         if theme in theme_cfg:
-            bg_hex, border_hex, title_text, msg_text = theme_cfg[theme]
+            bg_hex, border_hex = theme_cfg[theme]
+            title_text, msg_text = model_cfg.get(model, model_cfg[0])
             pattern_idx = self.custom_pattern_combo.currentIndex() if hasattr(self, 'custom_pattern_combo') else 0
             img_path = self.custom_image_edit.text() if hasattr(self, 'custom_image_edit') else ""
             font_fam = "DejaVuSans"
