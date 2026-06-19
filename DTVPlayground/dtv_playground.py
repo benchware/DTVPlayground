@@ -14,7 +14,7 @@ Audio:    MP2 inside MPEG-TS stream, decoded by ffmpeg → aplay 48kHz stereo
 """
 import sys, os
 os.environ["QT_LOGGING_RULES"] = "qt.qpa.wayland.warning=false;qt.qpa.wayland=false"
-import time, socket, threading, subprocess, io, math, random, queue, signal, json
+import time, socket, threading, subprocess, math, random, queue, signal, json
 import numpy as np
 from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtWidgets import (
@@ -495,9 +495,9 @@ class MpegTsDecoderThread(QThread):
         # Separate queues so slow video decoder can't starve audio and vice-versa.
         # Maxsize must be large enough to absorb OS scheduling jitter at 20Mbps (1080p).
         # We rely primarily on the 8MB OS UDP socket buffer to prevent packet drops.
-        # Keeping these internal queues smaller (2048 = ~2.6MB) prevents A/V desync latency.
-        self.vq = queue.Queue(maxsize=2048)
-        self.aq = queue.Queue(maxsize=2048)
+        # Keeping these internal queues smaller (128 = ~168KB) prevents A/V desync latency.
+        self.vq = queue.Queue(maxsize=128)
+        self.aq = queue.Queue(maxsize=128)
 
     def set_deinterlace(self, val: bool):
         self.deinterlace = val
@@ -763,7 +763,7 @@ class MpegTsDecoderThread(QThread):
                 time.sleep(0.1)
 
         if not bound or not self.running:
-            print(f"[DEC] Could not bind or thread stopped.")
+            print("[DEC] Could not bind or thread stopped.")
             return
 
         if not self._start_video():
@@ -1138,7 +1138,6 @@ class DtvPlaygroundApp(QMainWindow):
         if enabled:
             self._start_preview()
         else:
-            self._safe_stop_thread('preview_thread')
             if self.preview_proc:
                 try:
                     if self.preview_proc.stdin: self.preview_proc.stdin.close()
@@ -1151,6 +1150,7 @@ class DtvPlaygroundApp(QMainWindow):
                     self.preview_proc.wait(timeout=0.2)
                 except Exception: pass
                 self.preview_proc = None
+            self._safe_stop_thread('preview_thread')
             self.orig_screen.setText("Preview Disabled")
             self.orig_screen.setStyleSheet("background:#000; color:#555; font-size: 14px; font-weight: bold; border:1px solid #30363d;")
 
@@ -1261,30 +1261,37 @@ class DtvPlaygroundApp(QMainWindow):
 
         def stop_worker():
             # Stop processes in background to prevent UI hangs
-            if old_enc:
-                try: 
-                    old_enc.stop()
-                    old_enc.wait()
-                except Exception: pass
-            if old_dec:
-                try: 
-                    old_dec.stop()
-                    old_dec.wait()
-                except Exception: pass
-            if old_prev:
-                try: 
-                    old_prev.stop()
-                    old_prev.wait()
-                except Exception: pass
             if old_prev_proc:
                 try:
                     old_prev_proc.terminate()
-                    old_prev_proc.wait(timeout=1)
+                    old_prev_proc.wait(timeout=0.2)
+                except Exception: pass
+            if old_enc:
+                try: old_enc.stop()
+                except Exception: pass
+            if old_dec:
+                try: old_dec.stop()
+                except Exception: pass
+            if old_prev:
+                try: old_prev.stop()
                 except Exception: pass
             if old_relay:
                 try:
                     old_relay.stop()
-                    old_relay.join(timeout=0.2)
+                except Exception: pass
+
+            # Now wait for threads to exit
+            if old_enc:
+                try: old_enc.wait()
+                except Exception: pass
+            if old_dec:
+                try: old_dec.wait()
+                except Exception: pass
+            if old_prev:
+                try: old_prev.wait()
+                except Exception: pass
+            if old_relay:
+                try: old_relay.join(timeout=0.2)
                 except Exception: pass
             
             # Notify GUI thread to start new processes safely
@@ -1293,26 +1300,30 @@ class DtvPlaygroundApp(QMainWindow):
         threading.Thread(target=stop_worker, daemon=True).start()
 
     def _on_restart_complete(self):
-        # Safely instantiate QThreads in the main GUI thread
-        tx_port = int(self.tx_port_input.text()) if hasattr(self, 'tx_port_input') else 5005
-        rx_port = int(self.rx_port_input.text()) if hasattr(self, 'rx_port_input') else 5002
-        self.channel_relay = PythonChannelRelay(get_lock_fn=self.get_lock_pct, tx_port=tx_port, rx_port=rx_port)
-        self.channel_relay.start()
+        try:
+            # Safely instantiate QThreads in the main GUI thread
+            tx_port = int(self.tx_port_input.text()) if hasattr(self, 'tx_port_input') else 5005
+            rx_port = int(self.rx_port_input.text()) if hasattr(self, 'rx_port_input') else 5002
+            self.channel_relay = PythonChannelRelay(get_lock_fn=self.get_lock_pct, tx_port=tx_port, rx_port=rx_port)
+            self.channel_relay.start()
 
-        if self._next_restart_decoder:
-            self._start_decoder()
-        self._start_encoder()
-        
-        self.timer_tx.setInterval(int(1000 / max(self.fps, 1)))
-        # Reset TX pattern state
-        self.ball_x = self.video_width  // 2
-        self.ball_y = self.video_height // 2
-        self.text_x = self.video_width
-        self._is_restarting = False
-        
-        # If user rapidly clicked presets/playlist during restart, do it again
-        if getattr(self, '_pending_restart', False):
-            self._restart_pipeline(getattr(self, '_pending_restart_dec', True))
+            if self._next_restart_decoder:
+                self._start_decoder()
+            self._start_encoder()
+            
+            self.timer_tx.setInterval(int(1000 / max(self.fps, 1)))
+            # Reset TX pattern state
+            self.ball_x = self.video_width  // 2
+            self.ball_y = self.video_height // 2
+            self.text_x = self.video_width
+        except Exception as e:
+            print(f"[RESTART] Error on restart complete: {e}")
+        finally:
+            self._is_restarting = False
+            
+            # If user rapidly clicked presets/playlist during restart, do it again
+            if getattr(self, '_pending_restart', False):
+                self._restart_pipeline(getattr(self, '_pending_restart_dec', True))
 
     # ─────────────────────────────────────────────────────────────
     #  STYLESHEET
@@ -1465,7 +1476,19 @@ class DtvPlaygroundApp(QMainWindow):
         self.preset_combo = QComboBox()
         self.preset_combo.addItems([
             "-- Select Preset --",
-            "1. ATSC 480i Local (UHF, 10 km, Set-top)"
+            "1. ATSC 480i Local (UHF, 10 km, Set-top)",
+            "2. DVB-T 720p Rooftop (DVB-T, UHF, 25 km)",
+            "3. DVB-S2 1080i Satellite (DVB-S2, Ku-Band, 38000 km, Clear)",
+            "4. J.83B 1080p Cable (J.83B, UHF, 1 km)",
+            "5. Tropospheric DX 480i (ATSC, VHF, 350 km, Tropo Fading)",
+            "6. Sporadic E-Skip 720p (DVB-T, VHF, 800 km, Ionospheric Fading)",
+            "7. ATSC 1080i Fringe (ATSC, UHF, 75 km, Weak Signal)",
+            "8. DVB-T2 1080p Modern (DVB-T2, UHF, 15 km)",
+            "9. Ku-Band Satellite Rain Fade (Ku-Band, 38000 km, Heavy Rain)",
+            "10. J.83B Cable High Noise (J.83B, UHF, 5 km)",
+            "11. Severe Multipath Ghosting (ATSC, VHF, 15 km)",
+            "12. Datamoshing Cliff Edge (DVB-T2, UHF, 42 km)",
+            "13. Deep Fried Datamosh (High Error Rate)"
         ])
         self.preset_combo.currentIndexChanged.connect(self.on_preset_changed)
         pv.addWidget(self.preset_combo)
@@ -2586,6 +2609,18 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
 
         cfg = {
             1: dict(service_type=0, std=0, band=1, wx=0, pwr=40, dist=10,  lna=True,  prop=0, theme=0, res=0, il=True,  acodec=1, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
+            2: dict(service_type=0, std=1, band=1, wx=0, pwr=43, dist=25,  lna=True,  prop=0, theme=0, res=2, il=False, acodec=0, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
+            3: dict(service_type=2, std=1, band=4, wx=0, pwr=60, dist=38000, lna=True, prop=0, theme=1, res=3, il=True,  acodec=2, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
+            4: dict(service_type=1, std=0, band=4, wx=0, pwr=38, dist=2,   lna=False, prop=0, theme=2, res=4, il=False, acodec=1, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
+            5: dict(service_type=0, std=0, band=0, wx=0, pwr=55, dist=120, lna=True,  prop=1, theme=0, res=0, il=True,  acodec=0, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
+            6: dict(service_type=0, std=1, band=0, wx=0, pwr=65, dist=800, lna=True,  prop=2, theme=0, res=2, il=False, acodec=0, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
+            7: dict(service_type=0, std=0, band=1, wx=0, pwr=45, dist=75,  lna=True,  prop=0, theme=0, res=3, il=True,  acodec=1, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
+            8: dict(service_type=0, std=2, band=1, wx=0, pwr=42, dist=15,  lna=True,  prop=0, theme=0, res=4, il=False, acodec=2, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
+            9: dict(service_type=2, std=1, band=4, wx=3, pwr=65, dist=38000, lna=True, prop=0, theme=1, res=3, il=True,  acodec=2, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
+            10: dict(service_type=1, std=0, band=4, wx=0, pwr=35, dist=5,   lna=False, prop=0, theme=2, res=4, il=False, acodec=1, noise=35, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
+            11: dict(service_type=0, std=0, band=0, wx=0, pwr=40, dist=15,  lna=True,  prop=0, theme=0, res=3, il=True,  acodec=1, noise=0, freq=0, time=1000, fade=45, noise_offset=0, lna_gain=12, custom_pattern=0),
+            12: dict(service_type=0, std=2, band=1, wx=0, pwr=40, dist=42,  lna=True,  prop=0, theme=0, res=2, il=False, acodec=2, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
+            13: dict(service_type=0, std=2, band=1, wx=0, pwr=30, dist=45,  lna=False, prop=0, theme=0, res=2, il=False, acodec=2, noise=40, freq=0, time=1000, fade=0, noise_offset=10, lna_gain=5, custom_pattern=0),
         }.get(idx, {})
 
         if cfg:
@@ -3055,7 +3090,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             self.current_rx_frame = img
 
         if self.chk_enable_rx_preview.isChecked():
-            qimg   = QImage(frame_data, w, h, w * 3, QImage.Format_RGB888)
+            qimg   = QImage(frame_data, w, h, w * 3, QImage.Format_RGB888).copy()
             pixmap = QPixmap.fromImage(qimg)
             
             scaled_pix = pixmap.scaled(self.recv_screen.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -3186,7 +3221,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             # Active Watchdog: If we have a signal lock but FFmpeg is hung (heavy datamosh crash),
             # forcefully kill and respawn the decoder processes.
             if is_hung and getattr(self, 'mpeg_decoder', None):
-                if now - getattr(self, 'last_recovery_time', 0.0) > 15.0:
+                if now - getattr(self, 'last_recovery_time', 0.0) > 5.0:
                     print("[RX] Stream hung detected (FFmpeg stalled). Forcing decoder recovery...")
                     self.last_recovery_time = now
                     self.decoder_start_time = now  # Reset startup timer so it doesn't instantly trigger again
@@ -3374,7 +3409,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
                 draw.text((66, 130 + i * (font_sz + 12)), line, fill=(255, 255, 255), font=fn)
 
         self.current_rx_frame = img.copy()
-        qimg = QImage(img.tobytes('raw','RGB'), W, H, W * 3, QImage.Format_RGB888)
+        qimg = QImage(img.tobytes('raw','RGB'), W, H, W * 3, QImage.Format_RGB888).copy()
         pixmap = QPixmap.fromImage(qimg)
         
         scaled_pix = pixmap.scaled(self.recv_screen.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -3502,14 +3537,15 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
                        '-vf', f'setpts=PTS-STARTPTS,scale={target_w}:{target_h}:flags=lanczos',
                        '-af', 'asetpts=PTS-STARTPTS',
                        '-c:v', 'libx264', '-crf', '22', '-preset', 'superfast',
-                       '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', fname]
+                       '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k',
+                       '-shortest', fname]
             else:
                 cmd = ['ffmpeg', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
                        '-framerate', f'{actual_fps:.4f}', '-s', '960x540', '-i', '-',
                        '-map', '0:v:0',
                        '-vf', f'setpts=PTS-STARTPTS,scale={target_w}:{target_h}:flags=lanczos',
                        '-c:v', 'libx264', '-crf', '22', '-preset', 'superfast',
-                       '-pix_fmt', 'yuv420p', fname]
+                       '-pix_fmt', 'yuv420p', '-shortest', fname]
             try:
                 err_log_path = os.path.join(APP_DATA_DIR, 'transcode_stderr.log')
                 with open(err_log_path, 'w') as err_log:
@@ -3543,7 +3579,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
                     except Exception:
                         pass
                     QtCore.QMetaObject.invokeMethod(self.rec_lbl, "setText",
-                        QtCore.Qt.QueuedConnection, QtCore.Q_ARG(str, f"Save failed: transcode error"))
+                        QtCore.Qt.QueuedConnection, QtCore.Q_ARG(str, "Save failed: transcode error"))
                     print(f"[REC-SAVE] FFmpeg failed. Code: {proc.returncode}. Log:\n{err_content}")
             except Exception as e:
                 QtCore.QMetaObject.invokeMethod(self.rec_lbl, "setText",
@@ -3568,7 +3604,6 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             try: t.stop()
             except Exception: pass
 
-        self._safe_stop_thread('preview_thread')
         if self.preview_proc:
             try:
                 if self.preview_proc.stdin: self.preview_proc.stdin.close()
@@ -3581,6 +3616,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
                 self.preview_proc.wait(timeout=0.2)
             except Exception: pass
             self.preview_proc = None
+        self._safe_stop_thread('preview_thread')
 
         self._safe_stop_thread('mpeg_encoder')
         self._safe_stop_thread('mpeg_decoder')
