@@ -242,7 +242,8 @@ class MpegTsEncoderThread(QThread):
                  fps: int, bitrate_kbps: int, interlaced: bool,
                  audio_codec: str = 'mp2', seek_seconds: float = 0.0,
                  tx_port: int = 5005, crf: int = 22,
-                 custom_enc_args: str = "", preset: str = "medium"):
+                 custom_enc_args: str = "", preset: str = "medium",
+                 is_paused: bool = False):
         super().__init__()
         self.video_file   = video_file
         self.width        = width
@@ -256,6 +257,7 @@ class MpegTsEncoderThread(QThread):
         self.crf          = crf
         self.custom_enc_args = custom_enc_args
         self.preset       = preset
+        self.is_paused    = is_paused
         self.running      = True
         self.proc         = None
         self.err_log      = subprocess.DEVNULL
@@ -381,7 +383,10 @@ class MpegTsEncoderThread(QThread):
         else:
             # Synthetic: raw video from stdin. Determine if we are sending 4:3 or 16:9
             synth_w = 848 if self.width / self.height > 1.4 else 720
-            audio_src = 'sine=frequency=1000:sample_rate=48000:d=99999'
+            if getattr(self, 'is_paused', False):
+                audio_src = 'anullsrc=channel_layout=stereo:sample_rate=48000'
+            else:
+                audio_src = 'sine=frequency=1000:sample_rate=48000:d=99999'
             cmd = (['ffmpeg', '-y', '-loglevel', 'error',
                     '-f', 'rawvideo', '-pix_fmt', 'rgb24',
                     '-s', f'{synth_w}x480',
@@ -1079,7 +1084,8 @@ class DtvPlaygroundApp(QMainWindow):
             tx_port=tx_port,
             crf=crf,
             custom_enc_args=custom_enc_args,
-            preset=preset
+            preset=preset,
+            is_paused=self.playback_paused
         )
         self.mpeg_encoder.start()
         # TX display preview (small ffmpeg for UI only)
@@ -1260,13 +1266,22 @@ class DtvPlaygroundApp(QMainWindow):
         self._is_restarting = True
         self._pending_restart = False
         
-        # Update seek position to current playback time to avoid "jump back"
-        if self.video_file and getattr(self, 'video_duration', 0.0) > 0 and not getattr(self, 'playback_paused', False):
-            elapsed = time.time() - getattr(self, 'play_start_time', time.time())
-            curr_pos = (getattr(self, 'play_start_offset', 0.0) + elapsed) % self.video_duration
-            self.seek_seconds = float(curr_pos)
-            self.play_start_offset = float(curr_pos)
+        # Reset seek position if the video file has changed; otherwise update it to avoid "jump back"
+        last_file = getattr(self, '_last_video_file', "")
+        file_changed = (last_file != self.video_file)
+        self._last_video_file = self.video_file
+
+        if file_changed:
+            self.seek_seconds = 0.0
+            self.play_start_offset = 0.0
             self.play_start_time = time.time()
+        else:
+            if self.video_file and getattr(self, 'video_duration', 0.0) > 0 and not getattr(self, 'playback_paused', False):
+                elapsed = time.time() - getattr(self, 'play_start_time', time.time())
+                curr_pos = (getattr(self, 'play_start_offset', 0.0) + elapsed) % self.video_duration
+                self.seek_seconds = float(curr_pos)
+                self.play_start_offset = float(curr_pos)
+                self.play_start_time = time.time()
 
         old_enc = self.mpeg_encoder
         old_dec = self.mpeg_decoder if restart_decoder else None
@@ -2232,7 +2247,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             if hasattr(self, 'btn_play_pause'):
                 self.btn_play_pause.setText("Pause")
             self._probe_file_details(fname)
-            self._restart_pipeline(restart_decoder=False)
+            self._restart_pipeline(restart_decoder=True)
 
     def on_resolution_changed(self, idx):
         if idx < 0 or idx >= len(DTV_RESOLUTIONS):
@@ -2324,7 +2339,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             HW_DEC_FLAGS, HW_ENC_FLAGS, VAAPI_VF = [], [], []
         
         print(f"[HW] Switched to: {HW_ENC}")
-        self._restart_pipeline(restart_decoder=False)
+        self._restart_pipeline(restart_decoder=True)
 
     def on_tx_double_clicked(self):
         self.enter_fullscreen('tx')
@@ -3292,6 +3307,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             
             if curr_pos >= self.video_duration:
                 if hasattr(self, 'chk_auto_advance') and self.chk_auto_advance.isChecked() and self.playlist_widget.count() > 1:
+                    self.video_duration = 0.0
                     QtCore.QTimer.singleShot(0, self.on_playlist_next)
                 elif hasattr(self, 'chk_loop') and self.chk_loop.isChecked():
                     self.play_start_time = time.time()
