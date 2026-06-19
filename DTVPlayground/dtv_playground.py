@@ -132,12 +132,13 @@ class PythonChannelRelay(threading.Thread):
     Preserves 0x47 sync bytes so the decoder can still find packet boundaries.
     Forwards corrupted datagrams to rx_port.
     """
-    def __init__(self, get_lock_fn, tx_port=5005, rx_port=5002):
+    def __init__(self, get_lock_fn, tx_port=5005, rx_port=5002, parent_win=None):
         super().__init__(daemon=True)
         self.get_lock = get_lock_fn
         self.running  = True
         self.tx_port  = tx_port
         self.rx_port  = rx_port
+        self.parent_win = parent_win
 
         self.rx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.rx_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -190,14 +191,20 @@ class PythonChannelRelay(threading.Thread):
             except Exception:
                 continue
 
+            num_pkts = len(data) // 188
+            if self.parent_win:
+                self.parent_win._tx_pkt_count += num_pkts
+
             lock = self.get_lock()
-            # print(f'DEBUG: Relay running. Lock: {lock}, BER: {ber}')
             ber  = self._ber(lock)
 
             # Drop datagrams less aggressively so we can see block artifacts down to 45% lock
             drop = max(0.0, (ber - 0.05) * 1.5)
             if random.random() < drop:
                 continue
+
+            if self.parent_win:
+                self.parent_win._rx_pkt_count += num_pkts
 
             if ber > 5e-4:
                 data = self._corrupt_ts(data, ber)
@@ -532,8 +539,8 @@ class MpegTsDecoderThread(QThread):
                '-fflags', 'nobuffer',
                '-err_detect', 'ignore_err',
                '-ec', 'deblock+favor_inter',
-               '-analyzeduration', '1000000',
-               '-probesize', '250000',
+               '-analyzeduration', '2000000',
+               '-probesize', '1000000',
                '-f', 'mpegts', '-i', 'pipe:0']
             + custom_args_list
             + ['-map', '0:v?',
@@ -556,8 +563,8 @@ class MpegTsDecoderThread(QThread):
              '-max_error_rate', '1.0',
              '-fflags', 'nobuffer',
              '-err_detect', 'ignore_err',
-             '-analyzeduration', '1000000',
-             '-probesize', '250000',
+             '-analyzeduration', '2000000',
+             '-probesize', '1000000',
              '-f', 'mpegts', '-i', 'pipe:0']
             + custom_args_list
             + ['-map', '0:a?',
@@ -991,7 +998,7 @@ class DtvPlaygroundApp(QMainWindow):
         # ── Channel Relay ─────────────────────────────────────
         tx_port = int(self.tx_port_input.text()) if hasattr(self, 'tx_port_input') else 5005
         rx_port = int(self.rx_port_input.text()) if hasattr(self, 'rx_port_input') else 5002
-        self.channel_relay = PythonChannelRelay(get_lock_fn=self.get_lock_pct, tx_port=tx_port, rx_port=rx_port)
+        self.channel_relay = PythonChannelRelay(get_lock_fn=self.get_lock_pct, tx_port=tx_port, rx_port=rx_port, parent_win=self)
         self.channel_relay.start()
         print(f"[RELAY] TX:{tx_port} → RX:{rx_port}")
 
@@ -1046,8 +1053,9 @@ class DtvPlaygroundApp(QMainWindow):
         preset = self.custom_preset_combo.currentText() if hasattr(self, 'custom_preset_combo') else "medium"
         custom_enc_args = self.custom_enc_args_input.text() if hasattr(self, 'custom_enc_args_input') else ""
 
+        vid_file = "" if self.playback_paused else self.video_file
         self.mpeg_encoder = MpegTsEncoderThread(
-            video_file=self.video_file,
+            video_file=vid_file,
             width=self.video_width, height=self.video_height,
             fps=self.fps, bitrate_kbps=self.bitrate_kbps,
             interlaced=self.interlaced,
@@ -1060,7 +1068,8 @@ class DtvPlaygroundApp(QMainWindow):
         )
         self.mpeg_encoder.start()
         # TX display preview (small ffmpeg for UI only)
-        self._start_preview()
+        if not self.playback_paused:
+            self._start_preview()
 
     def _start_decoder(self):
         if self.mpeg_decoder:
@@ -1184,11 +1193,11 @@ class DtvPlaygroundApp(QMainWindow):
         if self.current_theme == 'dark':
             self.current_theme = 'light'
             if hasattr(self, 'btn_toggle_theme'):
-                self.btn_toggle_theme.setText("🌓 Dark Mode")
+                self.btn_toggle_theme.setText("Dark Mode")
         else:
             self.current_theme = 'dark'
             if hasattr(self, 'btn_toggle_theme'):
-                self.btn_toggle_theme.setText("🌓 Light Mode")
+                self.btn_toggle_theme.setText("Light Mode")
         self._apply_stylesheet(self.current_theme)
 
     def on_theme_changed(self, idx):
@@ -1304,7 +1313,7 @@ class DtvPlaygroundApp(QMainWindow):
             # Safely instantiate QThreads in the main GUI thread
             tx_port = int(self.tx_port_input.text()) if hasattr(self, 'tx_port_input') else 5005
             rx_port = int(self.rx_port_input.text()) if hasattr(self, 'rx_port_input') else 5002
-            self.channel_relay = PythonChannelRelay(get_lock_fn=self.get_lock_pct, tx_port=tx_port, rx_port=rx_port)
+            self.channel_relay = PythonChannelRelay(get_lock_fn=self.get_lock_pct, tx_port=tx_port, rx_port=rx_port, parent_win=self)
             self.channel_relay.start()
 
             if self._next_restart_decoder:
@@ -1422,7 +1431,7 @@ class DtvPlaygroundApp(QMainWindow):
         ttl.setStyleSheet("color: #58a6ff; padding: 2px;")
         hdr.addWidget(ttl); hdr.addStretch()
         
-        self.btn_toggle_theme = QPushButton("🌓 Light Mode")
+        self.btn_toggle_theme = QPushButton("Light Mode")
         self.btn_toggle_theme.setFixedWidth(100)
         self.btn_toggle_theme.clicked.connect(self.on_toggle_theme)
         hdr.addWidget(self.btn_toggle_theme)
@@ -1479,16 +1488,7 @@ class DtvPlaygroundApp(QMainWindow):
             "1. ATSC 480i Local (UHF, 10 km, Set-top)",
             "2. DVB-T 720p Rooftop (DVB-T, UHF, 25 km)",
             "3. DVB-S2 1080i Satellite (DVB-S2, Ku-Band, 38000 km, Clear)",
-            "4. J.83B 1080p Cable (J.83B, UHF, 1 km)",
-            "5. Tropospheric DX 480i (ATSC, VHF, 350 km, Tropo Fading)",
-            "6. Sporadic E-Skip 720p (DVB-T, VHF, 800 km, Ionospheric Fading)",
-            "7. ATSC 1080i Fringe (ATSC, UHF, 75 km, Weak Signal)",
-            "8. DVB-T2 1080p Modern (DVB-T2, UHF, 15 km)",
-            "9. Ku-Band Satellite Rain Fade (Ku-Band, 38000 km, Heavy Rain)",
-            "10. J.83B Cable High Noise (J.83B, UHF, 5 km)",
-            "11. Severe Multipath Ghosting (ATSC, VHF, 15 km)",
-            "12. Datamoshing Cliff Edge (DVB-T2, UHF, 42 km)",
-            "13. Deep Fried Datamosh (High Error Rate)"
+            "4. J.83B 1080p Cable (J.83B, UHF, 1 km)"
         ])
         self.preset_combo.currentIndexChanged.connect(self.on_preset_changed)
         pv.addWidget(self.preset_combo)
@@ -1821,6 +1821,26 @@ class DtvPlaygroundApp(QMainWindow):
             "1080p Full HD (1920x1080)"
         ])
         rv.addWidget(self.rec_res_combo)
+
+        rv.addWidget(QLabel("Recording Aspect Ratio"))
+        self.rec_aspect_combo = QComboBox()
+        self.rec_aspect_combo.addItems([
+            "16:9 (Widescreen)",
+            "4:3 (Standard)",
+            "Stretch to Fill"
+        ])
+        self.rec_aspect_combo.setCurrentIndex(0)
+        rv.addWidget(self.rec_aspect_combo)
+
+        rv.addWidget(QLabel("On Playback Pause/Stop Broadcast:"))
+        self.pause_behavior_combo = QComboBox()
+        self.pause_behavior_combo.addItems([
+            "Pause: Last Frame | Stop/End: Test Card",
+            "Always Broadcast Test Card",
+            "Always Broadcast Last Frame"
+        ])
+        self.pause_behavior_combo.setCurrentIndex(0)
+        rv.addWidget(self.pause_behavior_combo)
 
         rec_row = QHBoxLayout()
         self.btn_record = QPushButton("Record RX"); self.btn_record.setCheckable(True)
@@ -2451,6 +2471,10 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         self.chk_auto_advance.setChecked(True)
         p_btn_col.addWidget(self.chk_auto_advance)
         
+        self.chk_loop = QCheckBox("Loop Video")
+        self.chk_loop.setChecked(True)
+        p_btn_col.addWidget(self.chk_loop)
+        
         playlist_row.addLayout(p_btn_col)
         pv.addLayout(playlist_row)
         
@@ -2461,46 +2485,21 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         if not self.video_file: return
         self.playback_paused = not self.playback_paused
         
-        has_stop_cont = hasattr(signal, 'SIGSTOP') and hasattr(signal, 'SIGCONT')
-
         if self.playback_paused:
             self.btn_play_pause.setText("Play")
             self.pause_start_time = time.time()
-            if has_stop_cont:
-                if self.mpeg_encoder and self.mpeg_encoder.proc:
-                    try: self.mpeg_encoder.proc.send_signal(signal.SIGSTOP)
-                    except Exception: pass
-                if self.preview_proc:
-                    try: self.preview_proc.send_signal(signal.SIGSTOP)
-                    except Exception: pass
-            else:
-                # Windows fallback: stop processes to pause
-                if self.mpeg_encoder:
-                    self._safe_stop_thread('mpeg_encoder')
-                if self.preview_proc:
-                    try:
-                        self.preview_proc.terminate()
-                        self.preview_proc.wait(timeout=1)
-                    except Exception: pass
-                    self.preview_proc = None
+            if getattr(self, 'latest_preview', None):
+                self.paused_frame_rgb = self.latest_preview
+            self._restart_pipeline()
         else:
             self.btn_play_pause.setText("Pause")
             if hasattr(self, 'pause_start_time'):
                 self.play_start_time += (time.time() - self.pause_start_time)
             
-            if has_stop_cont:
-                if self.mpeg_encoder and self.mpeg_encoder.proc:
-                    try: self.mpeg_encoder.proc.send_signal(signal.SIGCONT)
-                    except Exception: pass
-                if self.preview_proc:
-                    try: self.preview_proc.send_signal(signal.SIGCONT)
-                    except Exception: pass
-            else:
-                # Windows fallback: restart pipeline from the current progress offset
-                elapsed = time.time() - getattr(self, 'play_start_time', time.time())
-                curr_pos = getattr(self, 'play_start_offset', 0.0) + elapsed
-                self.seek_seconds = float(curr_pos)
-                self._restart_pipeline()
+            elapsed = time.time() - getattr(self, 'play_start_time', time.time())
+            curr_pos = getattr(self, 'play_start_offset', 0.0) + elapsed
+            self.seek_seconds = float(curr_pos)
+            self._restart_pipeline()
 
     def on_timeline_seek(self):
         val = self.timeline_slider.value()
@@ -2512,7 +2511,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         self.play_start_offset = float(seconds)
         self.play_start_time = time.time()
         self.playback_paused = False
-        self.btn_play_pause.setText("⏸ Pause")
+        self.btn_play_pause.setText("Pause")
         self._restart_pipeline()
 
     def on_playlist_add(self):
@@ -2612,15 +2611,6 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             2: dict(service_type=0, std=1, band=1, wx=0, pwr=43, dist=25,  lna=True,  prop=0, theme=0, res=2, il=False, acodec=0, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
             3: dict(service_type=2, std=1, band=4, wx=0, pwr=60, dist=38000, lna=True, prop=0, theme=1, res=3, il=True,  acodec=2, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
             4: dict(service_type=1, std=0, band=4, wx=0, pwr=38, dist=2,   lna=False, prop=0, theme=2, res=4, il=False, acodec=1, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
-            5: dict(service_type=0, std=0, band=0, wx=0, pwr=55, dist=120, lna=True,  prop=1, theme=0, res=0, il=True,  acodec=0, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
-            6: dict(service_type=0, std=1, band=0, wx=0, pwr=65, dist=800, lna=True,  prop=2, theme=0, res=2, il=False, acodec=0, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
-            7: dict(service_type=0, std=0, band=1, wx=0, pwr=45, dist=75,  lna=True,  prop=0, theme=0, res=3, il=True,  acodec=1, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
-            8: dict(service_type=0, std=2, band=1, wx=0, pwr=42, dist=15,  lna=True,  prop=0, theme=0, res=4, il=False, acodec=2, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
-            9: dict(service_type=2, std=1, band=4, wx=3, pwr=65, dist=38000, lna=True, prop=0, theme=1, res=3, il=True,  acodec=2, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
-            10: dict(service_type=1, std=0, band=4, wx=0, pwr=35, dist=5,   lna=False, prop=0, theme=2, res=4, il=False, acodec=1, noise=35, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
-            11: dict(service_type=0, std=0, band=0, wx=0, pwr=40, dist=15,  lna=True,  prop=0, theme=0, res=3, il=True,  acodec=1, noise=0, freq=0, time=1000, fade=45, noise_offset=0, lna_gain=12, custom_pattern=0),
-            12: dict(service_type=0, std=2, band=1, wx=0, pwr=40, dist=42,  lna=True,  prop=0, theme=0, res=2, il=False, acodec=2, noise=0, freq=0, time=1000, fade=0, noise_offset=0, lna_gain=12, custom_pattern=0),
-            13: dict(service_type=0, std=2, band=1, wx=0, pwr=30, dist=45,  lna=False, prop=0, theme=0, res=2, il=False, acodec=2, noise=40, freq=0, time=1000, fade=0, noise_offset=10, lna_gain=5, custom_pattern=0),
         }.get(idx, {})
 
         if cfg:
@@ -2964,7 +2954,7 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
     # ─────────────────────────────────────────────────────────────
     def media_loop(self):
         # TX display
-        if self.video_file:
+        if self.video_file and not self.playback_paused:
             if self.chk_enable_tx_preview.isChecked() and self.latest_preview is not None:
                 qimg = QImage(self.latest_preview, self.preview_w, self.preview_h, self.preview_w * 3, QImage.Format_RGB888)
                 pix = QPixmap.fromImage(qimg)
@@ -2975,13 +2965,28 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
                     self.fullscreen_view.setPixmap(fs_pix)
             # Encoder reads file independently — no push needed
         else:
-            # Synthetic: generate frame at 720x480 (4:3) or 848x480 (16:9) depending on target resolution
+            # Synthetic, stopped, or paused mode
             _, w, h, _, _ = DTV_RESOLUTIONS[self.res_combo.currentIndex()]
-            # If the target is widescreen (e.g., 720p, 1080p), make the internal test pattern 16:9 (848x480)
-            # 848 is used because MPEG-2 hardware encoders require width to be a multiple of 16.
             synth_w = 848 if w / h > 1.4 else 720
 
-            frame = self._make_test_pattern(synth_w, 480)
+            # Determine what to display/broadcast when paused/stopped
+            behavior = self.pause_behavior_combo.currentIndex() if hasattr(self, 'pause_behavior_combo') else 0
+            
+            frame = None
+            if self.playback_paused:
+                if behavior == 1: # Always Test Card
+                    frame = self._make_test_pattern(synth_w, 480)
+                else: # Last Frame
+                    if getattr(self, 'paused_frame_rgb', None):
+                        try:
+                            img = Image.frombytes('RGB', (self.preview_w, self.preview_h), self.paused_frame_rgb)
+                            img = img.resize((synth_w, 480), Image.Resampling.LANCZOS)
+                            frame = img.tobytes()
+                        except Exception:
+                            pass
+            
+            if frame is None:
+                frame = self._make_test_pattern(synth_w, 480)
 
             if self.interlace_checkbox.isChecked():
                 tx_frame = self._field_split(frame, synth_w, 480)
@@ -3029,30 +3034,76 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         return self.last_tx_frame.tobytes()
 
     def _make_test_pattern(self, w: int, h: int) -> bytes:
-        """SMPTE EG 1 colour bars + PLUGE + bouncing dot + scrolling label."""
-        img  = Image.new('RGB', (w, h))
+        # Check selected pattern from tuner / customization tab
+        pattern_idx = self.custom_pattern_combo.currentIndex() if hasattr(self, 'custom_pattern_combo') else 1
+        img_path = self.custom_image_edit.text() if hasattr(self, 'custom_image_edit') else ""
+        bg_hex = self.custom_bg_edit.text() if hasattr(self, 'custom_bg_edit') else "#0f0f12"
+        
+        def hex_to_rgb(hex_str):
+            hex_str = hex_str.lstrip('#')
+            try: return tuple(int(hex_str[i:i+2], 16) for i in (0, 2, 4))
+            except Exception: return (15, 15, 18)
+        bg_color = hex_to_rgb(bg_hex)
+
+        img = None
+        if pattern_idx == 0: # Solid Background Color
+            img = Image.new('RGB', (w, h), bg_color)
+        elif pattern_idx == 1: # SMPTE Bars
+            img = Image.new('RGB', (w, h))
+            draw = ImageDraw.Draw(img)
+            bar_h = int(h * 0.75)
+            bars = [(192,192,192),(192,192,0),(0,192,192),(0,192,0),
+                    (192,0,192),(192,0,0),(0,0,192),(19,19,19)]
+            bw = w // 8
+            for i, c in enumerate(bars):
+                draw.rectangle([i*bw, 0, (i+1)*bw, bar_h], fill=c)
+            # PLUGE
+            draw.rectangle([0,        bar_h, w//3,   h], fill=(0,  0,  0))
+            draw.rectangle([w//3,     bar_h, 2*w//3, h], fill=(19, 19, 19))
+            draw.rectangle([2*w//3,   bar_h, w,      h], fill=(192,192,192))
+        elif pattern_idx == 2: # Color Bars (Rainbow)
+            img = Image.new('RGB', (w, h))
+            draw = ImageDraw.Draw(img)
+            colors = [
+                (255, 255, 255), (255, 255, 0), (0, 255, 255), (0, 255, 0),
+                (255, 0, 255), (255, 0, 0), (0, 0, 255), (0, 0, 0)
+            ]
+            bar_w = w // len(colors)
+            for i, col in enumerate(colors):
+                draw.rectangle([i*bar_w, 0, (i+1)*bar_w if i < len(colors)-1 else w, h], fill=col)
+        elif pattern_idx == 3: # Grid / Crosshatch
+            img = Image.new('RGB', (w, h), (0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            grid_size = 40
+            for x in range(0, w, grid_size):
+                draw.line([x, 0, x, h], fill=(255, 255, 255), width=1)
+            for y in range(0, h, grid_size):
+                draw.line([0, y, w, y], fill=(255, 255, 255), width=1)
+        elif pattern_idx == 4: # White Noise (Animated)
+            arr = np.random.randint(0, 256, (h, w, 3), dtype=np.uint8)
+            img = Image.fromarray(arr, 'RGB')
+        elif pattern_idx == 5: # Custom Image File
+            if img_path and os.path.exists(img_path):
+                try:
+                    img_loaded = Image.open(img_path).convert('RGB')
+                    img = img_loaded.resize((w, h), Image.Resampling.LANCZOS)
+                except Exception as e:
+                    print(f"[THEME] Failed to load custom image: {e}")
+            if img is None:
+                img = Image.new('RGB', (w, h), bg_color)
+
         draw = ImageDraw.Draw(img)
-        bar_h = int(h * 0.75)
+        bar_h = int(h * 0.75) if pattern_idx == 1 else h
 
-        bars = [(192,192,192),(192,192,0),(0,192,192),(0,192,0),
-                (192,0,192),(192,0,0),(0,0,192),(19,19,19)]
-        bw = w // 8
-        for i, c in enumerate(bars):
-            draw.rectangle([i*bw, 0, (i+1)*bw, bar_h], fill=c)
-
-        # PLUGE
-        draw.rectangle([0,        bar_h, w//3,   h], fill=(0,  0,  0))
-        draw.rectangle([w//3,     bar_h, 2*w//3, h], fill=(19, 19, 19))
-        draw.rectangle([2*w//3,   bar_h, w,      h], fill=(192,192,192))
-
-        # Bouncing ball
-        r = max(6, min(w, h) // 40)
-        self.ball_x = max(r, min(self.ball_x + self.ball_dx, w - r))
-        self.ball_y = max(r, min(self.ball_y + self.ball_dy, bar_h - r))
-        if self.ball_x in (r, w - r):  self.ball_dx = -self.ball_dx; self.bounced = True
-        if self.ball_y in (r, bar_h - r): self.ball_dy = -self.ball_dy; self.bounced = True
-        draw.ellipse([self.ball_x-r, self.ball_y-r,
-                      self.ball_x+r, self.ball_y+r], fill=(255,255,255))
+        # Draw bouncing ball only on SMPTE or Grid patterns for visual test
+        if pattern_idx in (1, 3):
+            r = max(6, min(w, h) // 40)
+            self.ball_x = max(r, min(self.ball_x + self.ball_dx, w - r))
+            self.ball_y = max(r, min(self.ball_y + self.ball_dy, bar_h - r))
+            if self.ball_x in (r, w - r):  self.ball_dx = -self.ball_dx; self.bounced = True
+            if self.ball_y in (r, bar_h - r): self.ball_dy = -self.ball_dy; self.bounced = True
+            draw.ellipse([self.ball_x-r, self.ball_y-r,
+                          self.ball_x+r, self.ball_y+r], fill=(255,255,255))
 
         # Scrolling standard label
         self.text_x -= 2
@@ -3060,11 +3111,12 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         stds = ["ATSC (8VSB)", "DVB-S2 (8PSK)", "J.83B (64QAM)",
                 "DVB-T2 (256QAM)", "DVB-T (OFDM QPSK)"]
         lbl = stds[self.std_combo.currentIndex()]
-        try:
-            font = ImageFont.load_default()
-        except Exception:
-            font = None
-        draw.text((self.text_x, bar_h + 4), lbl, fill=(255, 255, 0), font=font)
+        try: font = ImageFont.load_default()
+        except Exception: font = None
+        
+        # Draw background panel for text readability
+        draw.rectangle([self.text_x - 4, bar_h - 22 if pattern_idx == 1 else h - 22, self.text_x + len(lbl)*8 + 4, bar_h - 2 if pattern_idx == 1 else h - 2], fill=(0,0,0))
+        draw.text((self.text_x, bar_h - 20 if pattern_idx == 1 else h - 20), lbl, fill=(255, 255, 0), font=font)
 
         return img.tobytes()
 
@@ -3075,7 +3127,6 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         """
         Received raw RGB24 frame from MPEG-2 decoder.
         """
-        self._rx_pkt_count += 1
         self.last_frame_recv = time.time()
         w, h = 960, 540
 
@@ -3134,8 +3185,13 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
                 f"background:{bg_live};border:2px solid #238636;"
                 f"border-radius:5px;padding:6px;color:#3fb950;")
 
-        tx = self._tx_pkt_count * 2
-        rx = self._rx_pkt_count * 2
+        now = time.time()
+        dt = now - getattr(self, 'last_metrics_time', now - 0.4)
+        if dt <= 0:
+            dt = 0.4
+        self.last_metrics_time = now
+        tx = int(self._tx_pkt_count / dt)
+        rx = int(self._rx_pkt_count / dt)
         self._tx_pkt_count = 0
         self._rx_pkt_count = 0
 
@@ -3181,12 +3237,29 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             elapsed = time.time() - getattr(self, 'play_start_time', time.time())
             curr_pos = getattr(self, 'play_start_offset', 0.0) + elapsed
             
-            if elapsed >= self.video_duration:
+            if curr_pos >= self.video_duration:
                 if hasattr(self, 'chk_auto_advance') and self.chk_auto_advance.isChecked() and self.playlist_widget.count() > 1:
                     QtCore.QTimer.singleShot(0, self.on_playlist_next)
+                elif hasattr(self, 'chk_loop') and self.chk_loop.isChecked():
+                    self.play_start_time = time.time()
+                    self.play_start_offset = 0.0
+                    curr_pos = 0.0
                 else:
-                    self.play_start_time += self.video_duration * (elapsed // self.video_duration)
-                    curr_pos = curr_pos % self.video_duration
+                    self.playback_paused = True
+                    self.btn_play_pause.setText("Play")
+                    curr_pos = self.video_duration
+                    # Switch to synthetic/testcard mode
+                    self.video_file = ''
+                    self.file_lbl.setText("Source: SMPTE test pattern (synthetic)")
+                    if hasattr(self, 'lbl_player_info'):
+                        self.lbl_player_info.setText("No active video file (playing synthetic pattern)")
+                    self.timeline_slider.setRange(0, 100)
+                    self.timeline_slider.setEnabled(False)
+                    self.time_lbl.setText("00:00 / 00:00")
+                    self.seek_seconds = 0.0
+                    self.play_start_offset = 0.0
+                    self.play_start_time = time.time()
+                    self._restart_pipeline()
 
             if hasattr(self, 'timeline_slider') and not self.timeline_slider.isSliderDown():
                 self.timeline_slider.setValue(int(curr_pos))
@@ -3425,14 +3498,38 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
     def _toggle_rec(self, checked):
         self.recording = checked
         if checked:
-            self.recording_frames = []
+            self.record_frame_count = 0
             self.record_start_time = time.time()
             self.timer_record.start(int(1000 / max(self.fps, 1)))
             self.btn_record.setText("Stop Recording")
             self.btn_record.setStyleSheet(
                 "background:#da3633;color:white;font-weight:bold;")
-            self.rec_lbl.setText("Recording RX (MPEG-TS packets to disk)...")
+            self.rec_lbl.setText("Recording RX (real-time encoding to disk)...")
             self.btn_save.setEnabled(False)
+
+            # Start real-time background video encoder
+            temp_video_path = os.path.join(APP_DATA_DIR, "rx_video_temp.mp4")
+            if os.path.exists(temp_video_path):
+                try: os.remove(temp_video_path)
+                except Exception: pass
+
+            cmd = [
+                'ffmpeg', '-y', '-loglevel', 'error',
+                '-f', 'rawvideo', '-pix_fmt', 'rgb24',
+                '-framerate', str(max(self.fps, 1)),
+                '-s', '960x540',
+                '-i', 'pipe:0',
+                '-c:v', 'libx264', '-crf', '22', '-preset', 'superfast',
+                '-pix_fmt', 'yuv420p',
+                temp_video_path
+            ]
+            try:
+                self.record_ffmpeg_proc = subprocess.Popen(
+                    cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+            except Exception as e:
+                print(f"[REC] Failed to start real-time FFmpeg process: {e}")
+                self.record_ffmpeg_proc = None
             
             # Open the temporary TS capture file
             try:
@@ -3450,6 +3547,16 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             self.btn_record.setText("Record RX")
             self.btn_record.setStyleSheet("")
             
+            # Close real-time video encoder process
+            if hasattr(self, 'record_ffmpeg_proc') and self.record_ffmpeg_proc:
+                try:
+                    if self.record_ffmpeg_proc.stdin:
+                        self.record_ffmpeg_proc.stdin.close()
+                    self.record_ffmpeg_proc.wait(timeout=10)
+                except Exception as e:
+                    print(f"[REC] Error closing real-time FFmpeg: {e}")
+                self.record_ffmpeg_proc = None
+            
             # Close the capture file
             if hasattr(self, '_rec_file') and self._rec_file:
                 try:
@@ -3460,12 +3567,15 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
                     pass
             self._rec_file = None
             
-            # Check if file exists and has size
+            # Check if files exist and have size
             rec_path = os.path.join(APP_DATA_DIR, "rx_capture.ts")
-            has_data = os.path.exists(rec_path) and os.path.getsize(rec_path) > 0
-            if has_data or len(self.recording_frames) > 0:
-                sz = os.path.getsize(rec_path) / 1024.0 if os.path.exists(rec_path) else 0.0
-                self.rec_lbl.setText(f"Stopped — {sz:.1f} KB TS stream captured, {len(self.recording_frames)} frames")
+            temp_video_path = os.path.join(APP_DATA_DIR, "rx_video_temp.mp4")
+            has_video = os.path.exists(temp_video_path) and os.path.getsize(temp_video_path) > 0
+            if has_video:
+                sz = os.path.getsize(temp_video_path) / 1024.0
+                if os.path.exists(rec_path):
+                    sz += os.path.getsize(rec_path) / 1024.0
+                self.rec_lbl.setText(f"Stopped — {sz:.1f} KB captured, {getattr(self, 'record_frame_count', 0)} frames")
                 self.btn_save.setEnabled(True)
             else:
                 self.rec_lbl.setText("Stopped — no data captured")
@@ -3473,21 +3583,30 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
 
     def _record_tick(self):
         if self.recording and self.current_rx_frame:
-            # Prevent memory exhaustion by limiting to 1800 frames (~1 min at 30fps)
-            if len(self.recording_frames) < 1800:
-                self.recording_frames.append(self.current_rx_frame.copy())
-                self.rec_lbl.setText(f"Recording...  {len(self.recording_frames)} frames")
+            # Prevent memory/disk exhaustion by limiting to 1800 frames (~1 min at 30fps)
+            if getattr(self, 'record_frame_count', 0) < 1800:
+                img_bytes = self.current_rx_frame.tobytes()
+                if hasattr(self, 'record_ffmpeg_proc') and self.record_ffmpeg_proc and self.record_ffmpeg_proc.stdin:
+                    try:
+                        self.record_ffmpeg_proc.stdin.write(img_bytes)
+                        self.record_ffmpeg_proc.stdin.flush()
+                        self.record_frame_count += 1
+                        self.rec_lbl.setText(f"Recording...  {self.record_frame_count} frames")
+                    except Exception as e:
+                        print(f"[REC] Error writing frame to FFmpeg: {e}")
+                        self._toggle_rec(False)
+                        self.btn_record.setChecked(False)
             else:
                 self._toggle_rec(False)
                 self.btn_record.setChecked(False)
                 self.rec_lbl.setText("Recording stopped (MAX FRAMES REACHED)")
 
     def _save_rec(self):
-        if not self.recording_frames:
+        temp_video_path = os.path.join(APP_DATA_DIR, "rx_video_temp.mp4")
+        if not os.path.exists(temp_video_path) or os.path.getsize(temp_video_path) == 0:
             return
             
         rec_path = os.path.join(APP_DATA_DIR, "rx_capture.ts")
-        # Ensure TS file has enough data (at least 10 TS packets) to avoid transcode hangs
         has_audio_input = os.path.exists(rec_path) and os.path.getsize(rec_path) > 1880
         
         fname, _ = QFileDialog.getSaveFileName(
@@ -3517,54 +3636,54 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         target_w = (target_w // 2) * 2
         target_h = (target_h // 2) * 2
 
-        # Calculate actual captured fps to guarantee A/V sync
-        elapsed = getattr(self, 'record_elapsed', 0.0)
-        n_frames = len(self.recording_frames)
-        if elapsed > 0.1 and n_frames > 0:
-            actual_fps = n_frames / elapsed
-        else:
-            actual_fps = max(self.fps, 1)
-
         self.rec_lbl.setText("Encoding to MP4 (transcoding TS with Audio)..." if has_audio_input else "Encoding to MP4 (video only)...")
         QtWidgets.QApplication.processEvents()
         
         # Transcode using FFmpeg in a background thread to keep UI responsive
         def transcode_worker():
+            vf_filters = ['setpts=PTS-STARTPTS']
+            
+            # Apply aspect ratio
+            aspect_idx = self.rec_aspect_combo.currentIndex() if hasattr(self, 'rec_aspect_combo') else 0
+            if aspect_idx == 0: # 16:9
+                vf_filters.append(f'scale={target_w}:{target_h}:flags=lanczos')
+                vf_filters.append('setdar=16/9')
+            elif aspect_idx == 1: # 4:3
+                vf_filters.append(f'scale={target_w}:{target_h}:flags=lanczos')
+                vf_filters.append('setdar=4/3')
+            else: # Stretch or Follow
+                vf_filters.append(f'scale={target_w}:{target_h}:flags=lanczos')
+
             if has_audio_input:
-                cmd = ['ffmpeg', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
-                       '-framerate', f'{actual_fps:.4f}', '-s', '960x540', '-i', '-',
-                       '-vn', '-i', rec_path, '-map', '0:v:0', '-map', '1:a:0?',
-                       '-vf', f'setpts=PTS-STARTPTS,scale={target_w}:{target_h}:flags=lanczos',
-                       '-af', 'asetpts=PTS-STARTPTS',
-                       '-c:v', 'libx264', '-crf', '22', '-preset', 'superfast',
-                       '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k',
-                       '-shortest', fname]
+                cmd = [
+                    'ffmpeg', '-y', '-loglevel', 'error',
+                    '-i', temp_video_path,
+                    '-vn', '-i', rec_path,
+                    '-map', '0:v:0', '-map', '1:a:0?',
+                    '-vf', ','.join(vf_filters),
+                    '-af', 'asetpts=PTS-STARTPTS',
+                    '-c:v', 'libx264', '-crf', '22', '-preset', 'superfast',
+                    '-pix_fmt', 'yuv420p',
+                    '-c:a', 'aac', '-b:a', '128k',
+                    '-shortest',
+                    fname
+                ]
             else:
-                cmd = ['ffmpeg', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
-                       '-framerate', f'{actual_fps:.4f}', '-s', '960x540', '-i', '-',
-                       '-map', '0:v:0',
-                       '-vf', f'setpts=PTS-STARTPTS,scale={target_w}:{target_h}:flags=lanczos',
-                       '-c:v', 'libx264', '-crf', '22', '-preset', 'superfast',
-                       '-pix_fmt', 'yuv420p', '-shortest', fname]
+                cmd = [
+                    'ffmpeg', '-y', '-loglevel', 'error',
+                    '-i', temp_video_path,
+                    '-map', '0:v:0',
+                    '-vf', ','.join(vf_filters),
+                    '-c:v', 'libx264', '-crf', '22', '-preset', 'superfast',
+                    '-pix_fmt', 'yuv420p',
+                    '-shortest',
+                    fname
+                ]
             try:
                 err_log_path = os.path.join(APP_DATA_DIR, 'transcode_stderr.log')
                 with open(err_log_path, 'w') as err_log:
                     proc = subprocess.Popen(
-                        cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=err_log)
-                    
-                    # Write all frames to stdin
-                    for img in self.recording_frames:
-                        if proc.poll() is not None:
-                            break
-                        try:
-                            proc.stdin.write(img.tobytes())
-                        except Exception:
-                            break
-                    try:
-                        proc.stdin.close()
-                    except Exception:
-                        pass
-                    
+                        cmd, stdout=subprocess.DEVNULL, stderr=err_log)
                     proc.wait(timeout=120)
                 
                 if proc.returncode == 0:
@@ -3627,10 +3746,12 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
             try: self.aplay_proc.terminate()
             except Exception: pass
         if self.gr_tb:
-            try: self.gr_tb.stop(); self.gr_tb.wait()
+            try: self.gr_tb.stop()
             except Exception: pass
 
         event.accept()
+        import os
+        os._exit(0)
 
 
 # ─────────────────────────────────────────────────────────────

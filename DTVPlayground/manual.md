@@ -4,7 +4,7 @@ Welcome to the **Digital Television (DTV) SDR Modulation & Link Budget Playgroun
 
 ---
 
-##  Table of Contents
+## Table of Contents
 1. [System Requirements](#system-requirements)
 2. [Installation & Setup](#installation--setup)
 3. [Core Features](#core-features)
@@ -15,7 +15,7 @@ Welcome to the **Digital Television (DTV) SDR Modulation & Link Budget Playgroun
 
 ---
 
-##  System Requirements
+## System Requirements
 
 This software is compatible with **Windows**, **macOS**, and **Linux**. It utilizes native subprocesses for high-performance video encoding and decoding.
 
@@ -28,7 +28,7 @@ This software is compatible with **Windows**, **macOS**, and **Linux**. It utili
 
 ---
 
-##  Installation & Setup
+## Installation & Setup
 
 ### 1. Install Media Tools
 Ensure `ffmpeg` and `ffplay` are installed and added to your system's environment variables (`PATH`).
@@ -53,7 +53,7 @@ python3 dtv_playground.py
 
 ---
 
-##  Core Features
+## Core Features
 
 *   **Authentic Signal Outages (No Fake Glitches)**: Unlike simpler tools, this simulation does not apply green overlay scripts or fake static. Instead, it corrupts actual MPEG-2 Transport Stream (MPEG-TS) packets at the byte level. The receiver's FFmpeg decoder processes this damaged stream natively, producing authentic motion smears, macroblock freezing, and audio dropouts.
 *   **Real-time Link Budget DSP**: Tweak transmit power, receiver distance, and LNA pre-amplification. The signal quality calculation uses real free-space path loss (FSPL), atmospheric rain fade, and foliage terrain losses.
@@ -63,11 +63,11 @@ python3 dtv_playground.py
 
 ---
 
-##  Settings & Configuration
+## Settings & Configuration
 
 ### Hardware Acceleration (AMD / Intel / NVIDIA / Software)
 In the **Media & Quality** tab, under **Hardware Acceleration Settings**, you can choose how FFmpeg encodes the broadcast:
-1.  **Auto-Detect (Recommended)**: Probes your GPU at startup. It will try Intel QuickSync Video (`mpeg2_qsv`) first, then VAAPI (`mpeg2_vaapi` - Linux standard for AMD/Intel), and fall back to Software if unsupported.
+1.  **Auto-Detect (Recommended)**: Probes your GPU at startup. It will try Intel QuickSync Video (`mpeg2_qsv`) first, then VAAPI (`mpeg2_vaapi` - Linux standard for AMD/Intel), and fall back to Software if unsupported. Note: VA-API is only supported on Linux; on Windows and macOS it is not available.
 2.  **Intel QSV**: Forces Intel CPU/GPU hardware encoding.
 3.  **VAAPI**: Forces Linux Video Acceleration API (ideal for AMD/Intel integrated/discrete GPUs).
 4.  **Software Only (Universal)**: Disables GPU acceleration, running the standard CPU encoder (`mpeg2video`). *NVIDIA GPUs do not support hardware MPEG-2 encoding (only H.264/HEVC/AV1), so NVIDIA users should select Software Only or Auto-Detect.*
@@ -78,7 +78,7 @@ In the **Media & Quality** tab, under **Hardware Acceleration Settings**, you ca
 
 ---
 
-##  Quick Presets Guide
+## Quick Presets Guide
 
 Select these from the **Quick Presets** dropdown in the Tuner tab to immediately demonstrate different DTV scenarios:
 
@@ -86,30 +86,22 @@ Select these from the **Quick Presets** dropdown in the Tuner tab to immediately
 2.  **DVB-T 720p Rooftop**: High-definition terrestrial television using DVB-T standard at 25 km.
 3.  **DVB-S2 1080i Satellite**: Ku-band satellite television under clear sky conditions at 38,000 km altitude.
 4.  **J.83B 1080p Cable**: Digital cable set-top box under perfect coaxial connection.
-5.  **Tropospheric DX 480i**: Long-distance terrestrial reception showing atmospheric propagation stability.
-6.  **Sporadic E-Skip 720p**: Dynamic fading simulation at 800 km distance on the VHF band.
-7.  **ATSC 1080i Fringe**: Low signal margin reception. The signal is right on the cliff edge of dropping lock.
-8.  **DVB-T2 1080p Modern**: High-efficiency European terrestrial standard.
-9.  **Satellite Rain Fade**: Satellite link in the Ka-band showing signal blockages under heavy thunderstorms.
-10. **Cable High Noise**: Simulates severe static/interference in a building's coaxial network.
-11. **Severe Multipath Ghosting**: Multipath reflection resulting in video ghosting.
-12. **Datamoshing Cliff Edge**: The sweet spot for datamoshing! Signal power and distance are set so the decoder is flooded with errors, creating constant block-smear artifacts.
 
 ---
 
-##  Recording & Muxing
+## Recording & Muxing
 
-*   **Synchronized Recording**: When recording, the app concurrently captures the visual screen frames in memory and saves raw incoming MPEG-TS UDP packets to a background `.ts` capture file.
-*   **Transcoding**: When you click "Save Recording", the app uses FFmpeg to merge these inputs. The resulting `.mp4` file contains the exact visual artifacts, static cards, and audio sync of your session.
-*   **Outage Recording**: If you record while there is "No Signal", the app automatically falls back to video-only recording, saving the themed warning screens to the MP4 file without errors or hangs.
+*   **Real-time Recording**: When recording, the app streams the decoded visual frames directly to a temporary MP4 file on disk (`rx_video_temp.mp4`) in real time, avoiding heavy RAM buffering. Concurrently, it captures raw incoming MPEG-TS UDP packets to `rx_capture.ts` for audio capture.
+*   **Muxing & Aspect Ratio**: When saving, you can choose custom resolutions and aspect ratios (16:9 widescreen, 4:3 standard, or stretch). The app muxes the video and audio streams seamlessly using FFmpeg, matching playback speed and sync exactly.
+*   **Outage Recording**: If you record while there is "No Signal", the app automatically encodes the themed warning screens to the MP4 file without errors or hangs.
 *   **Recording Resolution Picker**: Select from standard resolutions (480p up to 1080p) or choose "Follow Stream Resolution" to automatically scale the output to match the current broadcast standard.
 
 ---
 
-##  Troubleshooting & FAQs
+## Troubleshooting & FAQs
 
 #### Q: The RX Screen says "NO SIGNAL" constantly, even with 100% Signal Lock.
-*   **A**: FFmpeg might not be detecting the stream headers. Try clicking ** Pause** and then ** Play** (or choosing another preset) to restart the encoder and force FFmpeg to parse the stream again. Ensure `ffmpeg` is globally installed.
+*   **A**: FFmpeg might not be detecting the stream headers. Try clicking Pause and then Play (or choosing another preset) to restart the encoder and force FFmpeg to parse the stream again. Ensure `ffmpeg` is globally installed.
 
 #### Q: The transcode blocks or hangs when saving a recording.
 *   **A**: This is now prevented by ignoring the corrupted video packets in the captured `.ts` file and using the clean visual buffers in memory. If it still hangs, verify that `ffmpeg` is not being blocked by system permissions.
