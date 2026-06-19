@@ -3321,165 +3321,143 @@ Enable "RX Deinterlace" to apply yadif in the decoder pipeline.</p>
         theme = self.theme_combo.currentIndex()
         W, H  = 960, 540
 
-        if theme == 0:    # Terrestrial — digital set-top box card
-            img  = Image.new('RGB', (W, H), (15, 15, 18))
-            draw = ImageDraw.Draw(img)
-            fb = self._get_font("DejaVuSans-Bold.ttf", 15)
-            fn = self._get_font("DejaVuSans.ttf", 11)
-            # Draw a modern outlined warning box
-            draw.rectangle([18, H//2-26, W-18, H//2+26], fill=(0,0,0), outline=(220,70,70), width=1)
-            draw.text((36, H//2-20), "NO DIGITAL SIGNAL", fill=(255,255,255), font=fb)
-            draw.text((36, H//2+2),  "Check antenna & coaxial connection", fill=(200,200,200), font=fn)
+        # Pre-configured theme maps: (bg_hex, border_hex, title, message)
+        theme_cfg = {
+            0: ("#0f0f12", "#dc4646", "NO DIGITAL SIGNAL", "Check antenna & coaxial connection. Signal outage detected."),
+            1: ("#0a0e17", "#00f0ff", "SYSTEM OFFLINE", "Re-establishing satellite uplink connection... Searching transponder."),
+            2: ("#1a1000", "#ffb000", "MONOCHROME CRT - NO SIGNAL", "Check vertical sync and RF carrier signal feed."),
+            3: ("#000000", "#00ff00", "MATRIX OUTAGE", "Carrier signal lost in network loop. Scanning frequency block."),
+            4: ("#f0f0f0", "#24292f", "SIGNAL DISCONNECTED", "Please check coaxial wall outlet and input connection cables.")
+        }
 
-        elif theme == 1:  # Satellite — blue screen
-            img  = Image.new('RGB', (W, H), (10, 42, 95))
-            draw = ImageDraw.Draw(img)
-            fb   = self._get_font("DejaVuSans-Bold.ttf", 14)
-            fn   = self._get_font("DejaVuSans.ttf", 11)
-            draw.text((22, 26),  "SATELLITE RECEIVER  Error 771", fill=(235,203,139), font=fb)
-            draw.line([22, 48, W-22, 48], fill=(235,203,139), width=2)
-            draw.text((22, 56),  "Searching for satellite signal...", fill=(255,255,255), font=fb)
-            for i, line in enumerate([
-                "- Check LNB coaxial connection",
-                "- Verify dish pointing (El/Az angles)",
-                "- LNB voltage: 13V (V-pol) / 18V (H-pol)",
-                "- Rain fade: Ku/Ka bands severely attenuated in heavy rain",
-            ]):
-                draw.text((22, 98 + i*18), line, fill=(180,180,200), font=fn)
-
-        elif theme == 2:  # Cable — gray outage
-            img  = Image.new('RGB', (W, H), (22, 22, 24))
-            draw = ImageDraw.Draw(img)
-            fb   = self._get_font("DejaVuSans-Bold.ttf", 14)
-            fn   = self._get_font("DejaVuSans.ttf", 11)
-            draw.text((22, 28), "CABLE TV  —  NO SIGNAL", fill=(220,70,70), font=fb)
-            draw.line([22, 50, W-22, 50], fill=(220,70,70), width=2)
-            draw.text((22, 60), "No cable signal detected on this outlet.", fill=(255,255,255), font=fb)
-            draw.text((22, 96), "Error 504  —  Link Down", fill=(150,150,150), font=fn)
-            draw.text((22, 118), "Please check coaxial wall outlet and", fill=(180,180,180), font=fn)
-            draw.text((22, 138), "the cable connected to the rear panel.", fill=(180,180,180), font=fn)
-            draw.text((22, 180), "Support: 1-800-DTV-PLAY", fill=(80,120,200), font=fn)
-            
-        else:             # Custom Theme (index 3)
+        if theme in theme_cfg:
+            bg_hex, border_hex, title_text, msg_text = theme_cfg[theme]
+            pattern_idx = 0  # Solid color background
+            img_path = ""
+            font_fam = "DejaVuSans"
+            font_sz = 22
+        else:  # Custom Theme (index 5)
             bg_hex = self.custom_bg_edit.text() if hasattr(self, 'custom_bg_edit') else "#0f0f12"
             border_hex = self.custom_border_edit.text() if hasattr(self, 'custom_border_edit') else "#dc4646"
             title_text = self.custom_title_edit.text() if hasattr(self, 'custom_title_edit') else "CUSTOM BOX  —  NO SIGNAL"
             msg_text = self.custom_msg_edit.text() if hasattr(self, 'custom_msg_edit') else ""
             pattern_idx = self.custom_pattern_combo.currentIndex() if hasattr(self, 'custom_pattern_combo') else 0
             img_path = self.custom_image_edit.text() if hasattr(self, 'custom_image_edit') else ""
-
             font_fam = self.custom_font_family_edit.text() if hasattr(self, 'custom_font_family_edit') else "DejaVuSans"
             try: font_sz = int(self.custom_font_size_edit.text()) if hasattr(self, 'custom_font_size_edit') else 22
             except Exception: font_sz = 22
 
-            def hex_to_rgb(h):
-                h = h.lstrip('#')
-                try: return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
-                except Exception: return (0, 0, 0)
+        def hex_to_rgb(h):
+            h = h.lstrip('#')
+            try: return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+            except Exception: return (0, 0, 0)
 
-            bg_color = hex_to_rgb(bg_hex)
-            border_color = hex_to_rgb(border_hex)
+        bg_color = hex_to_rgb(bg_hex)
+        border_color = hex_to_rgb(border_hex)
+        
+        # Text color
+        text_color = (36, 41, 47) if theme == 4 else (255, 255, 255)
 
-            def draw_color_bars(draw_obj, w, h):
-                colors = [
-                    (255, 255, 255), (255, 255, 0), (0, 255, 255), (0, 255, 0),
-                    (255, 0, 255), (255, 0, 0), (0, 0, 255), (0, 0, 0)
-                ]
-                bar_w = w // len(colors)
-                for i, col in enumerate(colors):
-                    draw_obj.rectangle([i*bar_w, 0, (i+1)*bar_w if i < len(colors)-1 else w, h], fill=col)
+        def draw_color_bars(draw_obj, w, h):
+            colors = [
+                (255, 255, 255), (255, 255, 0), (0, 255, 255), (0, 255, 0),
+                (255, 0, 255), (255, 0, 0), (0, 0, 255), (0, 0, 0)
+            ]
+            bar_w = w // len(colors)
+            for i, col in enumerate(colors):
+                draw_obj.rectangle([i*bar_w, 0, (i+1)*bar_w if i < len(colors)-1 else w, h], fill=col)
 
-            def draw_smpte_bars(draw_obj, w, h):
-                h1 = (h * 2) // 3
-                colors = [
-                    (192, 192, 192), (192, 192, 0), (0, 192, 192), (0, 192, 0),
-                    (192, 0, 192), (192, 0, 0), (0, 0, 192)
-                ]
-                bar_w = w // len(colors)
-                for i, col in enumerate(colors):
-                    draw_obj.rectangle([i*bar_w, 0, (i+1)*bar_w if i < len(colors)-1 else w, h1], fill=col)
-                h2 = h1 + h // 12
-                rev_colors = [
-                    (0, 0, 192), (19, 19, 19), (192, 0, 192), (19, 19, 19),
-                    (0, 192, 192), (19, 19, 19), (192, 192, 192)
-                ]
-                for i, col in enumerate(rev_colors):
-                    draw_obj.rectangle([i*bar_w, h1, (i+1)*bar_w if i < len(rev_colors)-1 else w, h2], fill=col)
-                h3 = h
-                draw_obj.rectangle([0, h2, bar_w, h3], fill=(255, 255, 255))
-                draw_obj.rectangle([bar_w, h2, bar_w*2, h3], fill=(0, 0, 0))
-                draw_obj.rectangle([bar_w*2, h2, bar_w*3, h3], fill=(0, 33, 79))
-                draw_obj.rectangle([bar_w*3, h2, bar_w*4, h3], fill=(255, 255, 255))
-                draw_obj.rectangle([bar_w*4, h2, bar_w*5, h3], fill=(51, 0, 114))
-                draw_obj.rectangle([bar_w*5, h2, w, h3], fill=(19, 19, 19))
+        def draw_smpte_bars(draw_obj, w, h):
+            h1 = (h * 2) // 3
+            colors = [
+                (192, 192, 192), (192, 192, 0), (0, 192, 192), (0, 192, 0),
+                (192, 0, 192), (192, 0, 0), (0, 0, 192)
+            ]
+            bar_w = w // len(colors)
+            for i, col in enumerate(colors):
+                draw_obj.rectangle([i*bar_w, 0, (i+1)*bar_w if i < len(colors)-1 else w, h1], fill=col)
+            h2 = h1 + h // 12
+            rev_colors = [
+                (0, 0, 192), (19, 19, 19), (192, 0, 192), (19, 19, 19),
+                (0, 192, 192), (19, 19, 19), (192, 192, 192)
+            ]
+            for i, col in enumerate(rev_colors):
+                draw_obj.rectangle([i*bar_w, h1, (i+1)*bar_w if i < len(rev_colors)-1 else w, h2], fill=col)
+            h3 = h
+            draw_obj.rectangle([0, h2, bar_w, h3], fill=(255, 255, 255))
+            draw_obj.rectangle([bar_w, h2, bar_w*2, h3], fill=(0, 0, 0))
+            draw_obj.rectangle([bar_w*2, h2, bar_w*3, h3], fill=(0, 33, 79))
+            draw_obj.rectangle([bar_w*3, h2, bar_w*4, h3], fill=(255, 255, 255))
+            draw_obj.rectangle([bar_w*4, h2, bar_w*5, h3], fill=(51, 0, 114))
+            draw_obj.rectangle([bar_w*5, h2, w, h3], fill=(19, 19, 19))
 
-            def draw_grid(draw_obj, w, h):
-                draw_obj.rectangle([0, 0, w, h], fill=(0, 0, 0))
-                grid_size = 40
-                for x in range(0, w, grid_size):
-                    draw_obj.line([x, 0, x, h], fill=(255, 255, 255), width=1)
-                for y in range(0, h, grid_size):
-                    draw_obj.line([0, y, w, y], fill=(255, 255, 255), width=1)
+        def draw_grid(draw_obj, w, h):
+            draw_obj.rectangle([0, 0, w, h], fill=(0, 0, 0))
+            grid_size = 40
+            for x in range(0, w, grid_size):
+                draw_obj.line([x, 0, x, h], fill=(255, 255, 255), width=1)
+            for y in range(0, h, grid_size):
+                draw_obj.line([0, y, w, y], fill=(255, 255, 255), width=1)
 
-            def draw_white_noise(w, h):
-                arr = np.random.randint(0, 256, (h, w, 3), dtype=np.uint8)
-                return Image.fromarray(arr, 'RGB')
+        def draw_white_noise(w, h):
+            arr = np.random.randint(0, 256, (h, w, 3), dtype=np.uint8)
+            return Image.fromarray(arr, 'RGB')
 
-            def draw_custom_image(w, h, path):
-                if path and os.path.exists(path):
-                    try:
-                        img_loaded = Image.open(path).convert('RGB')
-                        return img_loaded.resize((w, h), Image.Resampling.LANCZOS)
-                    except Exception as e:
-                        print(f"[THEME] Failed to load custom image: {e}")
-                return None
+        def draw_custom_image(w, h, path):
+            if path and os.path.exists(path):
+                try:
+                    img_loaded = Image.open(path).convert('RGB')
+                    return img_loaded.resize((w, h), Image.Resampling.LANCZOS)
+                except Exception as e:
+                    print(f"[THEME] Failed to load custom image: {e}")
+            return None
 
-            img = None
-            if pattern_idx == 1:
-                img = Image.new('RGB', (W, H), (0, 0, 0))
-                draw_smpte_bars(ImageDraw.Draw(img), W, H)
-            elif pattern_idx == 2:
-                img = Image.new('RGB', (W, H), (0, 0, 0))
-                draw_color_bars(ImageDraw.Draw(img), W, H)
-            elif pattern_idx == 3:
-                img = Image.new('RGB', (W, H), (0, 0, 0))
-                draw_grid(ImageDraw.Draw(img), W, H)
-            elif pattern_idx == 4:
-                img = draw_white_noise(W, H)
-            elif pattern_idx == 5:
-                img = draw_custom_image(W, H, img_path)
+        img = None
+        if pattern_idx == 1:
+            img = Image.new('RGB', (W, H), (0, 0, 0))
+            draw_smpte_bars(ImageDraw.Draw(img), W, H)
+        elif pattern_idx == 2:
+            img = Image.new('RGB', (W, H), (0, 0, 0))
+            draw_color_bars(ImageDraw.Draw(img), W, H)
+        elif pattern_idx == 3:
+            img = Image.new('RGB', (W, H), (0, 0, 0))
+            draw_grid(ImageDraw.Draw(img), W, H)
+        elif pattern_idx == 4:
+            img = draw_white_noise(W, H)
+        elif pattern_idx == 5:
+            img = draw_custom_image(W, H, img_path)
 
-            if img is None:
-                img = Image.new('RGB', (W, H), bg_color)
+        if img is None:
+            img = Image.new('RGB', (W, H), bg_color)
 
-            draw = ImageDraw.Draw(img)
-            fb = self._get_font(font_fam + "-Bold.ttf" if not font_fam.lower().endswith(('.ttf', '.otf')) else font_fam, int(font_sz * 1.36))
-            fn = self._get_font(font_fam + ".ttf" if not font_fam.lower().endswith(('.ttf', '.otf')) else font_fam, font_sz)
+        draw = ImageDraw.Draw(img)
+        fb = self._get_font(font_fam + "-Bold.ttf" if not font_fam.lower().endswith(('.ttf', '.otf')) else font_fam, int(font_sz * 1.36))
+        fn = self._get_font(font_fam + ".ttf" if not font_fam.lower().endswith(('.ttf', '.otf')) else font_fam, font_sz)
 
-            # Paste semi-transparent card box in the center
-            overlay = Image.new('RGBA', (W, H), (0, 0, 0, 0))
-            ol_draw = ImageDraw.Draw(overlay)
-            ol_draw.rectangle([44, 44, W-44, H-44], fill=bg_color + (180,), outline=border_color + (255,), width=4)
-            img.paste(overlay, (0, 0), overlay)
+        # Paste semi-transparent card box in the center
+        overlay = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+        ol_draw = ImageDraw.Draw(overlay)
+        ol_draw.rectangle([44, 44, W-44, H-44], fill=bg_color + (180,), outline=border_color + (255,), width=4)
+        img.paste(overlay, (0, 0), overlay)
 
-            draw.text((66, 66), title_text, fill=border_color, font=fb)
-            draw.line([66, 110, W-66, 110], fill=border_color, width=4)
+        draw.text((66, 66), title_text, fill=border_color, font=fb)
+        draw.line([66, 110, W-66, 110], fill=border_color, width=4)
 
-            words = msg_text.split(' ')
-            lines = []
-            cur_line = ""
-            for word in words:
-                test_line = cur_line + (" " if cur_line else "") + word
-                if len(test_line) * (font_sz * 0.6) > W - 132:
-                    lines.append(cur_line)
-                    cur_line = word
-                else:
-                    cur_line = test_line
-            if cur_line:
+        words = msg_text.split(' ')
+        lines = []
+        cur_line = ""
+        for word in words:
+            test_line = cur_line + (" " if cur_line else "") + word
+            if len(test_line) * (font_sz * 0.6) > W - 132:
                 lines.append(cur_line)
+                cur_line = word
+            else:
+                cur_line = test_line
+        if cur_line:
+            lines.append(cur_line)
 
-            for i, line in enumerate(lines[:8]):
-                draw.text((66, 130 + i * (font_sz + 12)), line, fill=(255, 255, 255), font=fn)
+        for i, line in enumerate(lines[:8]):
+            draw.text((66, 130 + i * (font_sz + 12)), line, fill=text_color, font=fn)
 
         self.current_rx_frame = img.copy()
         qimg = QImage(img.tobytes('raw','RGB'), W, H, W * 3, QImage.Format_RGB888).copy()
